@@ -19358,7 +19358,7 @@ SITargetLowering::getTargetMMOFlags(const Instruction &I) const {
   if (I.getMetadata("amdgpu.last.use"))
     Flags |= MOLastUse;
   if (I.getMetadata("amdgpu.non.volatile"))
-    Flags |= MONonVolatile;
+    Flags |= MOThreadPrivate;
   return Flags;
 }
 
