@@ -159,6 +159,45 @@ static MCInst lowerVecEltInsertion(const MachineInstr *MI, unsigned Opcode) {
       .addImm(0);
 }
 
+bool SystemZAsmPrinter::doInitialization(Module &M) {
+  SM.reset();
+
+  // In HLASM, the only way to represent aliases is to use the 
+  // extra-label-at-definition strategy. This is similar to the AIX implementation
+  // with the additional caveat that all symbol attributes must be emitted before the label
+  // is emitted.
+  if (TM.getTargetTriple().isOSzOS()) {
+    // Construct an aliasing list for each GlobalObject.
+    for (const auto &Alias : M.aliases()) {
+      const GlobalObject *Aliasee = Alias.getAliaseeObject();
+      if (!Aliasee)
+      OutContext.reportError(
+          {}, "alias without a base object is not yet supported on z/OS.");
+
+      bool IsFunc = isa<Function>(Aliasee->stripPointerCasts());
+      if (IsFunc) {
+        if (Alias.hasWeakLinkage() || Alias.hasLinkOnceLinkage())
+          OutContext.reportError(
+              {}, "Weak alias/reference not supported on z/OS");
+        
+        llvm::dbgs() << "TONY storing alias " << Alias.getName() << " to aliasee " << Aliasee->getName() << "\n";
+        llvm::dbgs() << "TONY alias * " << &Alias << "\n";
+        MCSymbol *Name = getSymbol(&Alias);
+        if (Name) {
+          llvm::dbgs() << "TONY GVar found " << Name->getName() << "\n";
+          emitVisibility(Name, Alias.getVisibility());
+          emitLinkage(&Alias, Name);
+        }
+        GOAliasMap[Aliasee].push_back(&Alias);
+      }
+      else
+        OutContext.reportError(
+            {}, "only function aliases is supported in GOFF.");
+    }
+  }
+  return AsmPrinter::doInitialization(M);
+}
+
 // The XPLINK ABI requires that a no-op encoding the call type is emitted after
 // each call to a subroutine. This information can be used by the called
 // function to determine its entry point, e.g. for generating a backtrace. The
@@ -1784,6 +1823,30 @@ void SystemZAsmPrinter::emitPPA2(Module &M) {
   OutStreamer->popSection();
 }
 
+void SystemZAsmPrinter::emitGlobalAlias(const Module &M, const GlobalAlias &GA) {
+  if (!TM.getTargetTriple().isOSzOS())
+    return AsmPrinter::emitGlobalAlias(M, GA);
+
+  MCSymbol *Name = getSymbol(&GA);
+  llvm::dbgs() << "TONY alias * " << &GA << " Symbol " << Name << "\n";
+  bool IsFunc = isa<Function>(GA.getAliasee()->stripPointerCasts());
+  llvm::dbgs() << "TONY emitting alias for " << Name->getName() << "\n";
+
+  if (GA.hasExternalLinkage() || !MAI->getWeakRefDirective()) {
+    llvm::dbgs() << "TONY set global linkage\n";
+    OutStreamer->emitSymbolAttribute(Name, MCSA_Global);
+  }
+  else if (GA.hasWeakLinkage() || GA.hasLinkOnceLinkage()) {
+    OutContext.reportError(
+        {}, "Weak alias/reference not supported on z/OS");
+  }
+  else
+    assert(GA.hasLocalLinkage() && "Invalid alias linkage");
+
+  emitVisibility(Name, GA.getVisibility());
+  // Aliased function labels have already been emitted for z/OS
+}
+
 const MCExpr *SystemZAsmPrinter::lowerConstant(const Constant *CV,
                                                const Constant *BaseCV,
                                                uint64_t Offset) {
@@ -1887,6 +1950,15 @@ void SystemZAsmPrinter::emitFunctionEntryLabel() {
   }
 
   AsmPrinter::emitFunctionEntryLabel();
+ 
+  if (Subtarget.getTargetTriple().isOSzOS()) {
+    const Function *F = &MF->getFunction();
+    // Emit aliasing label for function entry point label.
+    for (const GlobalAlias *Alias : GOAliasMap[F]) {
+      llvm::dbgs() << "TONY emitting label for " << Alias->getName() << "\n";
+      OutStreamer->emitLabel(getSymbol(Alias));
+    }
+  }
 }
 
 char SystemZAsmPrinter::ID = 0;

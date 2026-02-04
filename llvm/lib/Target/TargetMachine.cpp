@@ -312,6 +312,7 @@ MCSymbol *TargetMachine::getSymbol(const GlobalValue *GV) const {
 
   SmallString<128> NameStr;
   getNameWithPrefix(NameStr, GV, TLOF->getMangler());
+  llvm::dbgs() << "TONY get or create symbol " << NameStr << "\n";
   return TLOF->getContext().getOrCreateSymbol(NameStr);
 }
 
