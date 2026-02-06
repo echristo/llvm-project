@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "WebAssemblyAsmPrinter.h"
+#include "WebAssemblyDwarfDebug.h"
 #include "MCTargetDesc/WebAssemblyMCAsmInfo.h"
 #include "MCTargetDesc/WebAssemblyMCTargetDesc.h"
 #include "MCTargetDesc/WebAssemblyTargetStreamer.h"
@@ -56,6 +57,10 @@ using namespace llvm;
 #define DEBUG_TYPE "asm-printer"
 
 extern cl::opt<bool> WasmKeepRegisters;
+
+DwarfDebug *WebAssemblyAsmPrinter::createDwarfDebug() {
+  return new WebAssemblyDwarfDebug(this);
+}
 
 //===----------------------------------------------------------------------===//
 // Helpers.

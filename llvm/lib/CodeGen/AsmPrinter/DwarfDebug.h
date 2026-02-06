@@ -34,6 +34,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/MC/MCDwarf.h"
 #include "llvm/Support/Allocator.h"
+#include "llvm/CodeGen/TargetFrameLowering.h"
 #include "llvm/Target/TargetOptions.h"
 #include <cassert>
 #include <cstdint>
@@ -48,10 +49,12 @@ namespace llvm {
 class AsmPrinter;
 class ByteStreamer;
 class DIE;
+class DIELoc;
 class DwarfCompileUnit;
 class DwarfExpression;
 class DwarfTypeUnit;
 class DwarfUnit;
+class GlobalVariable;
 class LexicalScope;
 class MachineFunction;
 class MCSection;
@@ -796,6 +799,31 @@ public:
   virtual void emitAddressClass(DwarfUnit &DU, DIE &Die,
                                 std::optional<unsigned> AddressSpace,
                                 unsigned DefaultClass) const {}
+
+  /// Emit a target-specific location expression for a global variable.
+  /// Called during global variable DIE construction for TLS and PIC
+  /// relocations that require target-specific handling. Returns true if the
+  /// target handled the location, false to fall through to generic logic.
+  virtual bool addTargetGlobalVariableLocation(DwarfCompileUnit &CU,
+                                               DIELoc *Loc,
+                                               const GlobalVariable *Global,
+                                               const MCSymbol *Sym) {
+    return false;
+  }
+
+  /// Emit a target-specific encoding for a TargetIndexLocation entry.
+  /// The default implementation is unreachable since TargetIndexLocation
+  /// entries are only produced by targets that override this method.
+  virtual void addTargetIndexLocation(DwarfExpression &DwarfExpr,
+                                      const TargetIndexLocation &Loc);
+
+  /// Emit a target-specific frame base expression for DW_AT_frame_base.
+  /// Called for TargetFrameLowering::DwarfFrameBase::WasmFrameBase and
+  /// similar target-specific frame base kinds. The default implementation
+  /// is unreachable.
+  virtual void
+  emitTargetFrameBase(DwarfCompileUnit &CU, DIE &SPDie,
+                      const TargetFrameLowering::DwarfFrameBase &FrameBase);
 
   //===--------------------------------------------------------------------===//
   // Main entry points.

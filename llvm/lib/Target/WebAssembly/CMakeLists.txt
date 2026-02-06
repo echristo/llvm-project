@@ -37,6 +37,7 @@ add_llvm_target(WebAssemblyCodeGen
   WebAssemblyCleanCodeAfterTrap.cpp
   WebAssemblyCFGSort.cpp
   WebAssemblyDebugFixup.cpp
+  WebAssemblyDwarfDebug.cpp
   WebAssemblyDebugValueManager.cpp
   WebAssemblyLateEHPrepare.cpp
   WebAssemblyExceptionInfo.cpp

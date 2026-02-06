@@ -146,10 +146,6 @@ class DwarfCompileUnit final : public DwarfUnit {
 
   void finishNonUnitTypeDIE(DIE& D, const DICompositeType *CTy) override;
 
-  /// Add info for Wasm-global-based relocation.
-  void addWasmRelocBaseGlobal(DIELoc *Loc, StringRef GlobalName,
-                              uint64_t GlobalIndex);
-
   /// Create context DIE for abstract subprogram.
   /// \returns The context DIE and the compile unit where abstract
   ///          DIE should be constructed.

@@ -30,7 +30,6 @@
 #include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
-#include "llvm/MC/MCSymbolWasm.h"
 #include "llvm/MC/MachineLocation.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/NVPTXAddrSpace.h"
@@ -285,70 +284,56 @@ void DwarfCompileUnit::addLocationAttribute(
                    ? FormAndOp{dwarf::DW_FORM_data4, dwarf::DW_OP_const4u}
                    : FormAndOp{dwarf::DW_FORM_data8, dwarf::DW_OP_const8u};
       };
-      if (Global->isThreadLocal()) {
-        if (Asm->TM.getTargetTriple().isWasm()) {
-          // FIXME This is not guaranteed, but in practice, in static linking,
-          // if present, __tls_base's index is 1. This doesn't hold for dynamic
-          // linking, so TLS variables used in dynamic linking won't have
-          // correct debug info for now. See
-          // https://github.com/llvm/llvm-project/blob/19afbfe33156d211fa959dadeea46cd17b9c723c/lld/wasm/Driver.cpp#L786-L823
-          addWasmRelocBaseGlobal(Loc, "__tls_base", 1);
-          addOpAddress(*Loc, Sym);
-          addUInt(*Loc, dwarf::DW_FORM_data1, dwarf::DW_OP_plus);
-        } else if (Asm->TM.useEmulatedTLS()) {
-          // TODO: add debug info for emulated thread local mode.
-        } else {
-          // FIXME: Make this work with -gsplit-dwarf.
-          // Based on GCC's support for TLS:
-          if (!DD->useSplitDwarf()) {
-            auto FormAndOp = GetPointerSizedFormAndOp();
-            // 1) Start with a constNu of the appropriate pointer size
-            addUInt(*Loc, dwarf::DW_FORM_data1, FormAndOp.Op);
-            // 2) containing the (relocated) offset of the TLS variable
-            //    within the module's TLS block.
-            addExpr(*Loc, FormAndOp.Form,
-                    Asm->getObjFileLowering().getDebugThreadLocalSymbol(Sym));
+      if (!DD->addTargetGlobalVariableLocation(*this, Loc, Global, Sym)) {
+        if (Global->isThreadLocal()) {
+          if (Asm->TM.useEmulatedTLS()) {
+            // TODO: add debug info for emulated thread local mode.
           } else {
-            addUInt(*Loc, dwarf::DW_FORM_data1, dwarf::DW_OP_GNU_const_index);
-            addUInt(*Loc, dwarf::DW_FORM_udata,
-                    DD->getAddressPool().getIndex(Sym, /* TLS */ true));
+            // FIXME: Make this work with -gsplit-dwarf.
+            // Based on GCC's support for TLS:
+            if (!DD->useSplitDwarf()) {
+              auto FormAndOp = GetPointerSizedFormAndOp();
+              // 1) Start with a constNu of the appropriate pointer size
+              addUInt(*Loc, dwarf::DW_FORM_data1, FormAndOp.Op);
+              // 2) containing the (relocated) offset of the TLS variable
+              //    within the module's TLS block.
+              addExpr(*Loc, FormAndOp.Form,
+                      Asm->getObjFileLowering().getDebugThreadLocalSymbol(Sym));
+            } else {
+              addUInt(*Loc, dwarf::DW_FORM_data1, dwarf::DW_OP_GNU_const_index);
+              addUInt(*Loc, dwarf::DW_FORM_udata,
+                      DD->getAddressPool().getIndex(Sym, /* TLS */ true));
+            }
+            // 3) followed by an OP to make the debugger do a TLS lookup.
+            addUInt(*Loc, dwarf::DW_FORM_data1,
+                    DD->useGNUTLSOpcode() ? dwarf::DW_OP_GNU_push_tls_address
+                                          : dwarf::DW_OP_form_tls_address);
           }
-          // 3) followed by an OP to make the debugger do a TLS lookup.
+        } else if ((Asm->TM.getRelocationModel() == Reloc::RWPI ||
+                    Asm->TM.getRelocationModel() == Reloc::ROPI_RWPI) &&
+                   !Asm->getObjFileLowering()
+                        .getKindForGlobal(Global, Asm->TM)
+                        .isReadOnly()) {
+          auto FormAndOp = GetPointerSizedFormAndOp();
+          // Constant
+          addUInt(*Loc, dwarf::DW_FORM_data1, FormAndOp.Op);
+          // Relocation offset
+          addExpr(*Loc, FormAndOp.Form,
+                  Asm->getObjFileLowering().getIndirectSymViaRWPI(Sym));
+          // Base register
+          Register BaseReg = Asm->getObjFileLowering().getStaticBase();
+          unsigned DwarfBaseReg =
+              Asm->TM.getMCRegisterInfo()->getDwarfRegNum(BaseReg, false);
           addUInt(*Loc, dwarf::DW_FORM_data1,
-                  DD->useGNUTLSOpcode() ? dwarf::DW_OP_GNU_push_tls_address
-                                        : dwarf::DW_OP_form_tls_address);
+                  dwarf::DW_OP_breg0 + DwarfBaseReg);
+          // Offset from base register
+          addSInt(*Loc, dwarf::DW_FORM_sdata, 0);
+          // Operation
+          addUInt(*Loc, dwarf::DW_FORM_data1, dwarf::DW_OP_plus);
+        } else {
+          DD->addArangeLabel(SymbolCU(this, Sym));
+          addOpAddress(*Loc, Sym);
         }
-      } else if (Asm->TM.getTargetTriple().isWasm() &&
-                 Asm->TM.getRelocationModel() == Reloc::PIC_) {
-        // FIXME This is not guaranteed, but in practice, if present,
-        // __memory_base's index is 1. See
-        // https://github.com/llvm/llvm-project/blob/19afbfe33156d211fa959dadeea46cd17b9c723c/lld/wasm/Driver.cpp#L786-L823
-        addWasmRelocBaseGlobal(Loc, "__memory_base", 1);
-        addOpAddress(*Loc, Sym);
-        addUInt(*Loc, dwarf::DW_FORM_data1, dwarf::DW_OP_plus);
-      } else if ((Asm->TM.getRelocationModel() == Reloc::RWPI ||
-                  Asm->TM.getRelocationModel() == Reloc::ROPI_RWPI) &&
-                 !Asm->getObjFileLowering()
-                      .getKindForGlobal(Global, Asm->TM)
-                      .isReadOnly()) {
-        auto FormAndOp = GetPointerSizedFormAndOp();
-        // Constant
-        addUInt(*Loc, dwarf::DW_FORM_data1, FormAndOp.Op);
-        // Relocation offset
-        addExpr(*Loc, FormAndOp.Form,
-                Asm->getObjFileLowering().getIndirectSymViaRWPI(Sym));
-        // Base register
-        Register BaseReg = Asm->getObjFileLowering().getStaticBase();
-        unsigned DwarfBaseReg =
-            Asm->TM.getMCRegisterInfo()->getDwarfRegNum(BaseReg, false);
-        addUInt(*Loc, dwarf::DW_FORM_data1, dwarf::DW_OP_breg0 + DwarfBaseReg);
-        // Offset from base register
-        addSInt(*Loc, dwarf::DW_FORM_sdata, 0);
-        // Operation
-        addUInt(*Loc, dwarf::DW_FORM_data1, dwarf::DW_OP_plus);
-      } else {
-        DD->addArangeLabel(SymbolCU(this, Sym));
-        addOpAddress(*Loc, Sym);
       }
       if (!NVPTXAddressSpace)
         NVPTXAddressSpace =
@@ -466,40 +451,6 @@ void DwarfCompileUnit::attachLowHighPC(DIE &D, const MCSymbol *Begin,
   addLabelAddress(D, dwarf::DW_AT_high_pc, End);
 }
 
-// Add info for Wasm-global-based relocation.
-// 'GlobalIndex' is used for split dwarf, which currently relies on a few
-// assumptions that are not guaranteed in a formal way but work in practice.
-void DwarfCompileUnit::addWasmRelocBaseGlobal(DIELoc *Loc, StringRef GlobalName,
-                                              uint64_t GlobalIndex) {
-  // FIXME: duplicated from Target/WebAssembly/WebAssembly.h
-  // don't want to depend on target specific headers in this code?
-  const unsigned TI_GLOBAL_RELOC = 3;
-  unsigned PointerSize = Asm->getDataLayout().getPointerSize();
-  auto *Sym =
-      static_cast<MCSymbolWasm *>(Asm->GetExternalSymbolSymbol(GlobalName));
-  // FIXME: this repeats what WebAssemblyMCInstLower::
-  // GetExternalSymbolSymbol does, since if there's no code that
-  // refers to this symbol, we have to set it here.
-  Sym->setType(wasm::WASM_SYMBOL_TYPE_GLOBAL);
-  Sym->setGlobalType(wasm::WasmGlobalType{
-      static_cast<uint8_t>(PointerSize == 4 ? wasm::WASM_TYPE_I32
-                                            : wasm::WASM_TYPE_I64),
-      true});
-  addUInt(*Loc, dwarf::DW_FORM_data1, dwarf::DW_OP_WASM_location);
-  addSInt(*Loc, dwarf::DW_FORM_sdata, TI_GLOBAL_RELOC);
-  if (!isDwoUnit()) {
-    addLabel(*Loc, dwarf::DW_FORM_data4, Sym);
-  } else {
-    // FIXME: when writing dwo, we need to avoid relocations. Probably
-    // the "right" solution is to treat globals the way func and data
-    // symbols are (with entries in .debug_addr).
-    // For now we hardcode the indices in the callsites. Global indices are not
-    // fixed, but in practice a few are fixed; for example, __stack_pointer is
-    // always index 0.
-    addUInt(*Loc, dwarf::DW_FORM_data4, GlobalIndex);
-  }
-}
-
 // Find DIE for the given subprogram and attach appropriate DW_AT_low_pc
 // and DW_AT_high_pc attributes. If there are global variables in this
 // scope then create and insert DIEs for these variables.
@@ -551,26 +502,7 @@ DIE &DwarfCompileUnit::updateSubprogramScopeDIE(const DISubprogram *SP,
       break;
     }
     case TargetFrameLowering::DwarfFrameBase::WasmFrameBase: {
-      // FIXME: duplicated from Target/WebAssembly/WebAssembly.h
-      const unsigned TI_GLOBAL_RELOC = 3;
-      if (FrameBase.Location.WasmLoc.Kind == TI_GLOBAL_RELOC) {
-        // These need to be relocatable.
-        DIELoc *Loc = new (DIEValueAllocator) DIELoc;
-        assert(FrameBase.Location.WasmLoc.Index == 0); // Only SP so far.
-        // For now, since we only ever use index 0, this should work as-is.
-        addWasmRelocBaseGlobal(Loc, "__stack_pointer",
-                               FrameBase.Location.WasmLoc.Index);
-        addUInt(*Loc, dwarf::DW_FORM_data1, dwarf::DW_OP_stack_value);
-        addBlock(*SPDie, dwarf::DW_AT_frame_base, Loc);
-      } else {
-        DIELoc *Loc = new (DIEValueAllocator) DIELoc;
-        DIEDwarfExpression DwarfExpr(*Asm, *this, *Loc);
-        DIExpressionCursor Cursor({});
-        DwarfExpr.addWasmLocation(FrameBase.Location.WasmLoc.Kind,
-            FrameBase.Location.WasmLoc.Index);
-        DwarfExpr.addExpression(std::move(Cursor));
-        addBlock(*SPDie, dwarf::DW_AT_frame_base, DwarfExpr.finalize());
-      }
+      DD->emitTargetFrameBase(*this, *SPDie, FrameBase);
       break;
     }
     }
@@ -855,10 +787,7 @@ void DwarfCompileUnit::applyConcreteDbgVariableAttributes(
       DwarfExpr.addUnsignedConstant(RawBytes.getZExtValue());
     } else if (Entry.isTargetIndexLocation()) {
       TargetIndexLocation Loc = Entry.getTargetIndexLocation();
-      // TODO TargetIndexLocation is a target-independent. Currently
-      // only the WebAssembly-specific encoding is supported.
-      assert(Asm->TM.getTargetTriple().isWasm());
-      DwarfExpr.addWasmLocation(Loc.Index, static_cast<uint64_t>(Loc.Offset));
+      DD->addTargetIndexLocation(DwarfExpr, Loc);
     } else {
       llvm_unreachable("Unsupported Entry type.");
     }

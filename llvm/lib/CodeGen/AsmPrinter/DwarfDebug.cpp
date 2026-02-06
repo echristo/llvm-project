@@ -2195,6 +2195,17 @@ void DwarfDebug::beginInstruction(const MachineInstr *MI) {
     PrevInstLoc = DL;
 }
 
+void DwarfDebug::addTargetIndexLocation(DwarfExpression &DwarfExpr,
+                                        const TargetIndexLocation &Loc) {
+  llvm_unreachable("TargetIndexLocation not supported by this target");
+}
+
+void DwarfDebug::emitTargetFrameBase(
+    DwarfCompileUnit &CU, DIE &SPDie,
+    const TargetFrameLowering::DwarfFrameBase &FrameBase) {
+  llvm_unreachable("Target-specific frame base not supported by this target");
+}
+
 /// Default implementation of target-specific source line recording.
 void DwarfDebug::recordTargetSourceLine(const DebugLoc &DL, unsigned Flags) {
   SmallString<128> LocationString;
@@ -3224,10 +3235,7 @@ void DwarfDebug::emitDebugLocValue(const AsmPrinter &AP, const DIBasicType *BT,
         return false;
     } else if (Entry.isTargetIndexLocation()) {
       TargetIndexLocation Loc = Entry.getTargetIndexLocation();
-      // TODO TargetIndexLocation is a target-independent. Currently only the
-      // WebAssembly-specific encoding is supported.
-      assert(AP.TM.getTargetTriple().isWasm());
-      DwarfExpr.addWasmLocation(Loc.Index, static_cast<uint64_t>(Loc.Offset));
+      AP.getDwarfDebug()->addTargetIndexLocation(DwarfExpr, Loc);
     } else if (Entry.isConstantFP()) {
       if (AP.getDwarfVersion() >= 4 && !AP.getDwarfDebug()->tuneForSCE() &&
           !Cursor) {
