@@ -1,13 +1,23 @@
-; RUN: llc < %s -mtriple=nvptx64-nvidia-cuda | FileCheck %s
+; RUN: llc < %s -mtriple=nvptx64-nvidia-cuda | FileCheck %s --check-prefixes=CHECK,V2
+; RUN: llc < %s -mtriple=nvptx64-nvidia-cuda -dwarf-version=2 | FileCheck %s --check-prefixes=CHECK,V2
+; RUN: llc < %s -mtriple=nvptx64-nvidia-cuda -dwarf-version=3 | FileCheck %s --check-prefixes=CHECK,V3
+; RUN: llc < %s -mtriple=nvptx64-nvidia-cuda -dwarf-version=4 | FileCheck %s --check-prefixes=CHECK,V4
+; RUN: llc < %s -mtriple=nvptx64-nvidia-cuda -dwarf-version=5 | FileCheck %s --check-prefixes=CHECK,V5
 
 ; Test that translateToNVVMDWARFAddrSpace() function translates NVVM IR address space
-; value `Shared` (3) to the corresponding DWARF DW_AT_address_class attribute for PTX.
+; value `Shared` (3) to the corresponding DWARF DW_AT_address_class attribute for PTX.
 
 ; CHECK: .section .debug_info
 ; CHECK:      .b8 103                                 // DW_AT_name
 ; CHECK-NEXT: .b8 0
-; CHECK-NEXT: .b32 55                                 // DW_AT_type
-; CHECK-NEXT: .b8 1                                   // DW_AT_decl_file
+; V2-NEXT:    .b32 54                                 // DW_AT_type
+; V3-NEXT:    .b32 54                                 // DW_AT_type
+; V4-NEXT:    .b32 54                                 // DW_AT_type
+; V5-NEXT:    .b32 56                                 // DW_AT_type
+; V2-NEXT:    .b8 1                                   // DW_AT_decl_file
+; V3-NEXT:    .b8 1                                   // DW_AT_decl_file
+; V4-NEXT:    .b8 1                                   // DW_AT_decl_file
+; V5-NEXT:    .b8 0                                   // DW_AT_decl_file
 ; CHECK-NEXT: .b8 1                                   // DW_AT_decl_line
 ; CHECK-NEXT: .b8 8                                   // DW_AT_address_class
 

@@ -311,6 +311,10 @@ static AccelTableKind computeAccelTableKind(unsigned DwarfVersion,
                                             bool GenerateTypeUnits,
                                             DebuggerKind Tuning,
                                             const Triple &TT) {
+  // NVPTX does not support accelerator tables.
+  if (TT.isNVPTX())
+    return AccelTableKind::None;
+
   // Honor an explicit request.
   if (AccelTables != AccelTableKind::Default)
     return AccelTables;
@@ -374,8 +378,8 @@ DwarfDebug::DwarfDebug(AsmPrinter *A)
   unsigned DwarfVersion = DwarfVersionNumber ? DwarfVersionNumber
                                     : MMI->getModule()->getDwarfVersion();
   // Use dwarf 4 by default if nothing is requested. For NVPTX, use dwarf 2.
-  DwarfVersion =
-      TT.isNVPTX() ? 2 : (DwarfVersion ? DwarfVersion : dwarf::DWARF_VERSION);
+  if (!DwarfVersion)
+    DwarfVersion = TT.isNVPTX() ? 2 : dwarf::DWARF_VERSION;
 
   bool Dwarf64 = DwarfVersion >= 3 && // DWARF64 was introduced in DWARFv3.
                  TT.isArch64Bit();    // DWARF64 requires 64-bit relocations.

@@ -1589,6 +1589,10 @@ void DwarfCompileUnit::emitHeader(bool UseOffsets) {
 }
 
 bool DwarfCompileUnit::hasDwarfPubSections() const {
+  // NVPTX does not support pub sections.
+  if (Asm->TM.getTargetTriple().isNVPTX())
+    return false;
+
   switch (CUNode->getNameTableKind()) {
   case DICompileUnit::DebugNameTableKind::None:
     return false;
