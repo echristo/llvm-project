@@ -324,7 +324,16 @@ public:
 
     explicit DAGUpdateListener(SelectionDAG &D)
       : Next(D.UpdateListeners), DAG(D) {
+      // GCC's -Wdangling-pointer warns about storing 'this' from a local.
+      // This is a false positive for the RAII listener pattern.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdangling-pointer"
+#endif
       DAG.UpdateListeners = this;
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
     }
 
     virtual ~DAGUpdateListener() {
