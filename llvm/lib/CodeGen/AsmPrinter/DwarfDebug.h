@@ -347,6 +347,27 @@ enum class AccelTableKind {
   Dwarf,   ///< DWARF v5 .debug_names.
 };
 
+/// Target-specific defaults for DWARF emission, passed to
+/// DwarfDebug::initializeDwarfDefaults. The base DwarfDebug constructor
+/// uses generic defaults; derived classes (e.g. NVPTXDwarfDebug) call
+/// initializeDwarfDefaults again with target-specific values.
+struct DwarfDefaultsConfig {
+  /// Whether the target wants inline strings by default.
+  bool InlineStrings = false;
+
+  /// Whether the target supports a .debug_ranges section.
+  bool RangesSection = true;
+
+  /// Whether the target uses section references instead of temp symbols.
+  bool SectionsAsReferences = false;
+
+  /// Default DWARF version when none is explicitly requested.
+  unsigned DwarfVersion = dwarf::DWARF_VERSION;
+
+  /// Whether the target supports accelerator tables.
+  bool AccelTables = true;
+};
+
 /// Collects and handles dwarf debug information.
 class DwarfDebug : public DebugHandlerBase {
   /// All DIEValues are allocated through this allocator.
@@ -724,11 +745,58 @@ protected:
   /// Target-specific source line recording.
   virtual void recordTargetSourceLine(const DebugLoc &DL, unsigned Flags);
 
+  /// Apply target-specific defaults for DWARF-related fields, respecting
+  /// command-line flag overrides. Called from the DwarfDebug constructor with
+  /// base defaults, and may be called again from a derived class constructor
+  /// (e.g. NVPTXDwarfDebug) with target-specific defaults. This avoids
+  /// virtual dispatch issues in constructors while keeping flag logic in one
+  /// place.
+  void initializeDwarfDefaults(const DwarfDefaultsConfig &Defaults);
+
   const SmallVectorImpl<std::unique_ptr<DwarfCompileUnit>> &getUnits() {
     return InfoHolder.getUnits();
   }
 
 public:
+  //===--------------------------------------------------------------------===//
+  // Target-specific DWARF hooks.
+  //
+  // These methods allow targets (e.g. NVPTX) to customize DWARF
+  // emission without scattering target checks through generic code.
+
+  /// Whether the target supports using a base address for compile unit ranges
+  /// and location lists. Targets that cannot subtract labels in debug sections
+  /// (e.g. PTX) return false.
+  virtual bool useCompileUnitBaseAddress(const DwarfCompileUnit &CU) const {
+    return true;
+  }
+
+  /// Whether the target supports .debug_pubnames/.debug_pubtypes sections.
+  virtual bool supportsPubSections() const { return true; }
+
+  /// Extract a target-specific address class from a DIExpression. If the
+  /// expression encodes an address space (e.g. DW_OP_constu <space>
+  /// DW_OP_swap DW_OP_xderef), strip that prefix and set \p AddressSpace.
+  /// The default implementation does nothing.
+  virtual void extractAddressClass(const DIExpression *&Expr,
+                                   std::optional<unsigned> &AddressSpace) const {
+  }
+
+  /// Map an IR address space number to a target-specific DWARF address class.
+  /// Returns std::nullopt if no mapping exists. The default does nothing.
+  virtual std::optional<unsigned>
+  mapAddressSpaceToClass(unsigned IRAddressSpace) const {
+    return std::nullopt;
+  }
+
+  /// Emit a DW_AT_address_class attribute on \p Die if the target requires it.
+  /// \p AddressSpace is the address space extracted or inferred earlier;
+  /// \p DefaultClass is the target-specific fallback when no space was found.
+  /// The default implementation does nothing.
+  virtual void emitAddressClass(DwarfUnit &DU, DIE &Die,
+                                std::optional<unsigned> AddressSpace,
+                                unsigned DefaultClass) const {}
+
   //===--------------------------------------------------------------------===//
   // Main entry points.
   //

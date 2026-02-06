@@ -311,10 +311,6 @@ static AccelTableKind computeAccelTableKind(unsigned DwarfVersion,
                                             bool GenerateTypeUnits,
                                             DebuggerKind Tuning,
                                             const Triple &TT) {
-  // NVPTX does not support accelerator tables.
-  if (TT.isNVPTX())
-    return AccelTableKind::None;
-
   // Honor an explicit request.
   if (AccelTables != AccelTableKind::Default)
     return AccelTables;
@@ -355,11 +351,6 @@ DwarfDebug::DwarfDebug(AsmPrinter *A)
   else
     DebuggerTuning = DebuggerKind::GDB;
 
-  if (DwarfInlinedStrings == Default)
-    UseInlineStrings = TT.isNVPTX() || tuneForDBX();
-  else
-    UseInlineStrings = DwarfInlinedStrings == Enable;
-
   // Always emit .debug_aranges for SCE tuning.
   UseARangesSection = GenerateARangeSection || tuneForSCE();
 
@@ -374,81 +365,24 @@ DwarfDebug::DwarfDebug(AsmPrinter *A)
   else
     UseAllLinkageNames = DwarfLinkageNames == AllLinkageNames;
 
-  unsigned DwarfVersionNumber = Asm->TM.Options.MCOptions.DwarfVersion;
-  unsigned DwarfVersion = DwarfVersionNumber ? DwarfVersionNumber
-                                    : MMI->getModule()->getDwarfVersion();
-  // Use dwarf 4 by default if nothing is requested. For NVPTX, use dwarf 2.
-  if (!DwarfVersion)
-    DwarfVersion = TT.isNVPTX() ? 2 : dwarf::DWARF_VERSION;
-
-  bool Dwarf64 = DwarfVersion >= 3 && // DWARF64 was introduced in DWARFv3.
-                 TT.isArch64Bit();    // DWARF64 requires 64-bit relocations.
-
-  // Support DWARF64
-  // 1: For ELF when requested.
-  // 2: For XCOFF64: the AIX assembler will fill in debug section lengths
-  //    according to the DWARF64 format for 64-bit assembly, so we must use
-  //    DWARF64 in the compiler too for 64-bit mode.
-  Dwarf64 &=
-      ((Asm->TM.Options.MCOptions.Dwarf64 || MMI->getModule()->isDwarf64()) &&
-       TT.isOSBinFormatELF()) ||
-      TT.isOSBinFormatXCOFF();
-
-  if (!Dwarf64 && TT.isArch64Bit() && TT.isOSBinFormatXCOFF())
-    report_fatal_error("XCOFF requires DWARF64 for 64-bit mode!");
-
-  UseRangesSection = !NoDwarfRangesSection && !TT.isNVPTX();
-
-  // Use sections as references. Force for NVPTX.
-  if (DwarfSectionsAsReferences == Default)
-    UseSectionsAsReferences = TT.isNVPTX();
-  else
-    UseSectionsAsReferences = DwarfSectionsAsReferences == Enable;
-
   // Don't generate type units for unsupported object file formats.
-  GenerateTypeUnits = (A->TM.getTargetTriple().isOSBinFormatELF() ||
-                       A->TM.getTargetTriple().isOSBinFormatWasm()) &&
+  GenerateTypeUnits = (TT.isOSBinFormatELF() || TT.isOSBinFormatWasm()) &&
                       GenerateDwarfTypeUnits;
 
-  TheAccelTableKind = computeAccelTableKind(
-      DwarfVersion, GenerateTypeUnits, DebuggerTuning, A->TM.getTargetTriple());
-
-  // Work around a GDB bug. GDB doesn't support the standard opcode;
-  // SCE doesn't support GNU's; LLDB prefers the standard opcode, which
-  // is defined as of DWARF 3.
-  // See GDB bug 11616 - DW_OP_form_tls_address is unimplemented
-  // https://sourceware.org/bugzilla/show_bug.cgi?id=11616
-  UseGNUTLSOpcode = tuneForGDB() || DwarfVersion < 3;
-
-  UseDWARF2Bitfields = DwarfVersion < 4;
-
-  // The DWARF v5 string offsets table has - possibly shared - contributions
-  // from each compile and type unit each preceded by a header. The string
-  // offsets table used by the pre-DWARF v5 split-DWARF implementation uses
-  // a monolithic string offsets table without any header.
-  UseSegmentedStringOffsetsTable = DwarfVersion >= 5;
+  // Apply base defaults for target-sensitive fields (inline strings, ranges,
+  // sections-as-references, DWARF version, accelerator tables). Derived
+  // classes (e.g. NVPTXDwarfDebug) call this again with target-specific
+  // defaults from their own constructor body, after the vtable is set up.
+  initializeDwarfDefaults({});
 
   // Emit call-site-param debug info for GDB and LLDB, if the target supports
   // the debug entry values feature. It can also be enabled explicitly.
   EmitDebugEntryValues = Asm->TM.Options.ShouldEmitDebugEntryValues();
 
-  // It is unclear if the GCC .debug_macro extension is well-specified
-  // for split DWARF. For now, do not allow LLVM to emit it.
-  UseDebugMacroSection =
-      DwarfVersion >= 5 || (UseGNUDebugMacro && !useSplitDwarf());
   if (DwarfOpConvert == Default)
     EnableOpConvert = !((tuneForGDB() && useSplitDwarf()) || (tuneForLLDB() && !TT.isOSBinFormatMachO()));
   else
     EnableOpConvert = (DwarfOpConvert == Enable);
-
-  // Split DWARF would benefit object size significantly by trading reductions
-  // in address pool usage for slightly increased range list encodings.
-  if (DwarfVersion >= 5)
-    MinimizeAddr = MinimizeAddrInV5Option;
-
-  Asm->OutStreamer->getContext().setDwarfVersion(DwarfVersion);
-  Asm->OutStreamer->getContext().setDwarfFormat(Dwarf64 ? dwarf::DWARF64
-                                                        : dwarf::DWARF32);
 }
 
 // Define out of line so we don't have to include DwarfUnit.h in DwarfDebug.h.
@@ -1402,11 +1336,7 @@ void DwarfDebug::finalizeModuleInfo() {
     DwarfCompileUnit &U = SkCU ? *SkCU : TheCU;
 
     if (unsigned NumRanges = TheCU.getRanges().size()) {
-      // PTX does not support subtracting labels from the code section in the
-      // debug_loc section.  To work around this, the NVPTX backend needs the
-      // compile unit to have no low_pc in order to have a zero base_address
-      // when handling debug_loc in cuda-gdb.
-      if (!(Asm->TM.getTargetTriple().isNVPTX() && tuneForGDB())) {
+      if (useCompileUnitBaseAddress(TheCU)) {
         if (NumRanges > 1 && useRangesSection())
           // A DW_AT_low_pc attribute may also be specified in combination with
           // DW_AT_ranges to specify the default base address for use in
@@ -2274,6 +2204,63 @@ void DwarfDebug::recordTargetSourceLine(const DebugLoc &DL, unsigned Flags) {
   }
   recordSourceLine(DL.getLine(), DL.getCol(), DL.getScope(), Flags,
                    LocationString);
+}
+
+void DwarfDebug::initializeDwarfDefaults(const DwarfDefaultsConfig &Defaults) {
+  // Apply target defaults for these three fields, respecting command-line
+  // flag overrides.
+  if (DwarfInlinedStrings == Default)
+    UseInlineStrings = Defaults.InlineStrings || tuneForDBX();
+  else
+    UseInlineStrings = DwarfInlinedStrings == Enable;
+
+  if (NoDwarfRangesSection)
+    UseRangesSection = false;
+  else
+    UseRangesSection = Defaults.RangesSection;
+
+  if (DwarfSectionsAsReferences == Default)
+    UseSectionsAsReferences = Defaults.SectionsAsReferences;
+  else
+    UseSectionsAsReferences = DwarfSectionsAsReferences == Enable;
+
+  // Resolve DWARF version: explicit request > module metadata > target default.
+  unsigned DwarfVersionNumber = Asm->TM.Options.MCOptions.DwarfVersion;
+  unsigned DwarfVersion = DwarfVersionNumber
+                              ? DwarfVersionNumber
+                              : MMI->getModule()->getDwarfVersion();
+  if (!DwarfVersion)
+    DwarfVersion = Defaults.DwarfVersion;
+
+  const Triple &TT = Asm->TM.getTargetTriple();
+  bool Dwarf64 = DwarfVersion >= 3 && TT.isArch64Bit();
+  Dwarf64 &=
+      ((Asm->TM.Options.MCOptions.Dwarf64 || MMI->getModule()->isDwarf64()) &&
+       TT.isOSBinFormatELF()) ||
+      TT.isOSBinFormatXCOFF();
+
+  if (!Dwarf64 && TT.isArch64Bit() && TT.isOSBinFormatXCOFF())
+    report_fatal_error("XCOFF requires DWARF64 for 64-bit mode!");
+
+  // Derived values that depend on the DWARF version.
+  UseGNUTLSOpcode = tuneForGDB() || DwarfVersion < 3;
+  UseDWARF2Bitfields = DwarfVersion < 4;
+  UseSegmentedStringOffsetsTable = DwarfVersion >= 5;
+  UseDebugMacroSection =
+      DwarfVersion >= 5 || (UseGNUDebugMacro && !useSplitDwarf());
+  if (DwarfVersion >= 5)
+    MinimizeAddr = MinimizeAddrInV5Option;
+
+  // Accelerator tables.
+  if (Defaults.AccelTables)
+    TheAccelTableKind = computeAccelTableKind(DwarfVersion, GenerateTypeUnits,
+                                              DebuggerTuning, TT);
+  else
+    TheAccelTableKind = AccelTableKind::None;
+
+  Asm->OutStreamer->getContext().setDwarfVersion(DwarfVersion);
+  Asm->OutStreamer->getContext().setDwarfFormat(Dwarf64 ? dwarf::DWARF64
+                                                        : dwarf::DWARF32);
 }
 
 // Returns the position where we should place prologue_end, potentially nullptr,
@@ -3399,15 +3386,8 @@ emitRangeList(DwarfDebug &DD, AsmPrinter *Asm, MCSymbol *Sym, const Ranges &R,
   bool BaseIsSet = false;
   for (const auto &P : SectionRanges) {
     auto *Base = CUBase;
-    if ((Asm->TM.getTargetTriple().isNVPTX() && DD.tuneForGDB()) ||
+    if (!DD.useCompileUnitBaseAddress(CU) ||
         (DD.useSplitDwarf() && UseDwarf5 && P.first->isLinkerRelaxable())) {
-      // PTX does not support subtracting labels from the code section in the
-      // debug_loc section.  To work around this, the NVPTX backend needs the
-      // compile unit to have no low_pc in order to have a zero base_address
-      // when handling debug_loc in cuda-gdb.  Additionally, cuda-gdb doesn't
-      // seem to handle setting a per-variable base to zero.  To make cuda-gdb
-      // happy, just emit labels with no base while having no compile unit
-      // low_pc.
       BaseIsSet = false;
       Base = nullptr;
     } else if (!Base && ShouldUseBaseAddress) {

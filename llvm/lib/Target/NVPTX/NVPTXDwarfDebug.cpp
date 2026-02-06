@@ -13,6 +13,7 @@
 
 #include "NVPTXDwarfDebug.h"
 #include "NVPTXSubtarget.h"
+#include "llvm/CodeGen/DIE.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/IR/DebugInfoMetadata.h"
@@ -21,6 +22,7 @@
 #include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/NVPTXAddrSpace.h"
 #include "llvm/Target/TargetMachine.h"
 
 using namespace llvm;
@@ -33,7 +35,19 @@ static cl::opt<bool> LineInfoWithInlinedAt(
     cl::desc("Emit line with inlined_at enhancement for NVPTX"), cl::init(true),
     cl::Hidden);
 
-NVPTXDwarfDebug::NVPTXDwarfDebug(AsmPrinter *A) : DwarfDebug(A) {}
+NVPTXDwarfDebug::NVPTXDwarfDebug(AsmPrinter *A) : DwarfDebug(A) {
+  // Re-initialize with NVPTX-specific defaults. The base constructor already
+  // ran initializeDwarfDefaults with generic defaults; we call it again with
+  // NVPTX values. The flag logic inside initializeDwarfDefaults ensures that
+  // explicit command-line flags still take precedence.
+  DwarfDefaultsConfig NVPTXDefaults;
+  NVPTXDefaults.InlineStrings = true;
+  NVPTXDefaults.RangesSection = false;
+  NVPTXDefaults.SectionsAsReferences = true;
+  NVPTXDefaults.DwarfVersion = 2;
+  NVPTXDefaults.AccelTables = false;
+  initializeDwarfDefaults(NVPTXDefaults);
+}
 
 /// NVPTX-specific source line recording with inlined_at support.
 ///
@@ -174,4 +188,59 @@ void NVPTXDwarfDebug::recordTargetSourceLine(const DebugLoc &DL,
 void NVPTXDwarfDebug::initializeTargetDebugInfo(const MachineFunction &MF) {
   // Clear the set of emitted inlined_at locations for each new function.
   EmittedInlinedAtLocs.clear();
+}
+
+bool NVPTXDwarfDebug::useCompileUnitBaseAddress(
+    const DwarfCompileUnit &CU) const {
+  // PTX does not support subtracting labels in debug sections, so the
+  // compile unit cannot have a base address.
+  return false;
+}
+
+bool NVPTXDwarfDebug::supportsPubSections() const { return false; }
+
+/// Translate NVVM IR address space code to DWARF address class value.
+static unsigned translateToNVVMDWARFAddrSpace(unsigned AddrSpace) {
+  switch (AddrSpace) {
+  case NVPTXAS::ADDRESS_SPACE_GENERIC:
+    return NVPTXAS::DWARF_ADDR_generic_space;
+  case NVPTXAS::ADDRESS_SPACE_GLOBAL:
+    return NVPTXAS::DWARF_ADDR_global_space;
+  case NVPTXAS::ADDRESS_SPACE_SHARED:
+    return NVPTXAS::DWARF_ADDR_shared_space;
+  case NVPTXAS::ADDRESS_SPACE_CONST:
+    return NVPTXAS::DWARF_ADDR_const_space;
+  case NVPTXAS::ADDRESS_SPACE_LOCAL:
+    return NVPTXAS::DWARF_ADDR_local_space;
+  default:
+    llvm_unreachable(
+        "Cannot translate unknown address space to DWARF address space");
+    return AddrSpace;
+  }
+}
+
+void NVPTXDwarfDebug::extractAddressClass(
+    const DIExpression *&Expr,
+    std::optional<unsigned> &AddressSpace) const {
+  // Decode DW_OP_constu <DWARF Address Space> DW_OP_swap DW_OP_xderef
+  // sequence to extract the address space.
+  unsigned LocalAddressSpace;
+  const DIExpression *NewExpr =
+      DIExpression::extractAddressClass(Expr, LocalAddressSpace);
+  if (NewExpr != Expr) {
+    Expr = NewExpr;
+    AddressSpace = LocalAddressSpace;
+  }
+}
+
+std::optional<unsigned>
+NVPTXDwarfDebug::mapAddressSpaceToClass(unsigned IRAddressSpace) const {
+  return translateToNVVMDWARFAddrSpace(IRAddressSpace);
+}
+
+void NVPTXDwarfDebug::emitAddressClass(DwarfUnit &DU, DIE &Die,
+                                        std::optional<unsigned> AddressSpace,
+                                        unsigned DefaultClass) const {
+  DU.addUInt(Die, dwarf::DW_AT_address_class, dwarf::DW_FORM_data1,
+             AddressSpace.value_or(DefaultClass));
 }

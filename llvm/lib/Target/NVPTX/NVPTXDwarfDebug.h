@@ -20,9 +20,14 @@
 
 namespace llvm {
 
+class DwarfUnit;
+
 /// NVPTXDwarfDebug - NVPTX-specific DwarfDebug implementation.
-/// Inherits from DwarfDebug to provide enhanced line information with
-/// inlined_at support.
+/// Inherits from DwarfDebug to provide NVPTX-specific DWARF behavior:
+/// enhanced line information with inlined_at support, DWARF version
+/// defaults, address class handling for cuda-gdb, and suppression of
+/// features not supported by PTX (accelerator tables, pub sections,
+/// base addresses in debug sections).
 class NVPTXDwarfDebug : public DwarfDebug {
 private:
   /// Set of inlined_at locations that have already been emitted.
@@ -38,6 +43,28 @@ protected:
   void initializeTargetDebugInfo(const MachineFunction &MF) override;
   /// Override to record source line information with inlined_at support.
   void recordTargetSourceLine(const DebugLoc &DL, unsigned Flags) override;
+
+public:
+  /// PTX cannot subtract labels in debug sections, so base addresses
+  /// are not supported.
+  bool useCompileUnitBaseAddress(const DwarfCompileUnit &CU) const override;
+
+  /// NVPTX does not support .debug_pubnames/.debug_pubtypes.
+  bool supportsPubSections() const override;
+
+  /// Extract address class from a DIExpression.
+  void extractAddressClass(
+      const DIExpression *&Expr,
+      std::optional<unsigned> &AddressSpace) const override;
+
+  /// Map IR address space to DWARF address class.
+  std::optional<unsigned>
+  mapAddressSpaceToClass(unsigned IRAddressSpace) const override;
+
+  /// Emit DW_AT_address_class on a DIE.
+  void emitAddressClass(DwarfUnit &DU, DIE &Die,
+                        std::optional<unsigned> AddressSpace,
+                        unsigned DefaultClass) const override;
 };
 
 } // end namespace llvm
