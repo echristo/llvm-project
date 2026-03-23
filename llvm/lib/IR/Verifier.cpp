@@ -1647,7 +1647,39 @@ void Verifier::visitDICompileUnit(const DICompileUnit &N) {
       CheckDI(Op && isa<DIMacroNode>(Op), "invalid macro ref", &N, Op);
     }
   }
+  if (auto *Array = N.getRawDwarfProcedures()) {
+    CheckDI(isa<MDTuple>(Array), "invalid dwarf procedure list", &N, Array);
+    for (Metadata *Op : N.getDwarfProcedures()->operands()) {
+      CheckDI(!Op || isa<DIDwarfProcedure>(Op), "invalid dwarf procedure ref",
+              &N, Op);
+    }
+  }
   CUVisited.insert(&N);
+}
+
+void Verifier::visitDIDwarfProcedure(const DIDwarfProcedure &N) {
+  CheckDI(N.getTag() == dwarf::DW_TAG_dwarf_procedure, "invalid tag", &N);
+  CheckDI(N.getRawExpression(), "missing expression", &N);
+  CheckDI(isa<DIExpression>(N.getRawExpression()),
+          "expression must be a DIExpression", &N);
+
+  if (auto *Expr = N.getExpression()) {
+    // Procedure bodies are pure stack computations emitted as
+    // DW_AT_location on a DW_TAG_dwarf_procedure DIE. Reject ops that
+    // are location-description-specific (fragment, entry_value), require
+    // multi-value semantics (LLVM_arg), or would introduce recursion
+    // (call_procedure).
+    for (auto &Op : Expr->expr_ops()) {
+      CheckDI(Op.getOp() != dwarf::DW_OP_LLVM_fragment,
+              "DW_OP_LLVM_fragment invalid in procedure body", &N);
+      CheckDI(Op.getOp() != dwarf::DW_OP_LLVM_arg,
+              "DW_OP_LLVM_arg invalid in procedure body", &N);
+      CheckDI(Op.getOp() != dwarf::DW_OP_LLVM_entry_value,
+              "DW_OP_LLVM_entry_value invalid in procedure body", &N);
+      CheckDI(Op.getOp() != dwarf::DW_OP_LLVM_call_procedure,
+              "DW_OP_LLVM_call_procedure invalid in procedure body", &N);
+    }
+  }
 }
 
 void Verifier::visitDISubprogram(const DISubprogram &N) {

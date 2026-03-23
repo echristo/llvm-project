@@ -216,6 +216,7 @@ public:
     case DIModuleKind:
     case DIGenericSubrangeKind:
     case DIAssignIDKind:
+    case DIDwarfProcedureKind:
       return true;
     }
   }
@@ -2080,7 +2081,8 @@ private:
           DIImportedEntityArray ImportedEntities, DIMacroNodeArray Macros,
           uint64_t DWOId, bool SplitDebugInlining, bool DebugInfoForProfiling,
           unsigned NameTableKind, bool RangesBaseAddress, StringRef SysRoot,
-          StringRef SDK, StorageType Storage, bool ShouldCreate = true) {
+          StringRef SDK, DINodeArray DwarfProcedures, StorageType Storage,
+          bool ShouldCreate = true) {
     return getImpl(
         Context, SourceLanguage, File, getCanonicalMDString(Context, Producer),
         IsOptimized, getCanonicalMDString(Context, Flags), RuntimeVersion,
@@ -2089,7 +2091,8 @@ private:
         ImportedEntities.get(), Macros.get(), DWOId, SplitDebugInlining,
         DebugInfoForProfiling, NameTableKind, RangesBaseAddress,
         getCanonicalMDString(Context, SysRoot),
-        getCanonicalMDString(Context, SDK), Storage, ShouldCreate);
+        getCanonicalMDString(Context, SDK), DwarfProcedures.get(), Storage,
+        ShouldCreate);
   }
   LLVM_ABI static DICompileUnit *
   getImpl(LLVMContext &Context, DISourceLanguageName SourceLanguage,
@@ -2100,7 +2103,8 @@ private:
           Metadata *Macros, uint64_t DWOId, bool SplitDebugInlining,
           bool DebugInfoForProfiling, unsigned NameTableKind,
           bool RangesBaseAddress, MDString *SysRoot, MDString *SDK,
-          StorageType Storage, bool ShouldCreate = true);
+          Metadata *DwarfProcedures, StorageType Storage,
+          bool ShouldCreate = true);
 
   TempDICompileUnit cloneImpl() const {
     return getTemporary(
@@ -2109,7 +2113,7 @@ private:
         getEmissionKind(), getEnumTypes(), getRetainedTypes(),
         getGlobalVariables(), getImportedEntities(), getMacros(), DWOId,
         getSplitDebugInlining(), getDebugInfoForProfiling(), getNameTableKind(),
-        getRangesBaseAddress(), getSysRoot(), getSDK());
+        getRangesBaseAddress(), getSysRoot(), getSDK(), getDwarfProcedures());
   }
 
 public:
@@ -2126,12 +2130,12 @@ public:
        DIImportedEntityArray ImportedEntities, DIMacroNodeArray Macros,
        uint64_t DWOId, bool SplitDebugInlining, bool DebugInfoForProfiling,
        DebugNameTableKind NameTableKind, bool RangesBaseAddress,
-       StringRef SysRoot, StringRef SDK),
+       StringRef SysRoot, StringRef SDK, DINodeArray DwarfProcedures = nullptr),
       (SourceLanguage, File, Producer, IsOptimized, Flags, RuntimeVersion,
        SplitDebugFilename, EmissionKind, EnumTypes, RetainedTypes,
        GlobalVariables, ImportedEntities, Macros, DWOId, SplitDebugInlining,
        DebugInfoForProfiling, (unsigned)NameTableKind, RangesBaseAddress,
-       SysRoot, SDK))
+       SysRoot, SDK, DwarfProcedures))
   DEFINE_MDNODE_GET_DISTINCT_TEMPORARY(
       DICompileUnit,
       (DISourceLanguageName SourceLanguage, Metadata *File, MDString *Producer,
@@ -2141,11 +2145,12 @@ public:
        Metadata *ImportedEntities, Metadata *Macros, uint64_t DWOId,
        bool SplitDebugInlining, bool DebugInfoForProfiling,
        unsigned NameTableKind, bool RangesBaseAddress, MDString *SysRoot,
-       MDString *SDK),
+       MDString *SDK, Metadata *DwarfProcedures = nullptr),
       (SourceLanguage, File, Producer, IsOptimized, Flags, RuntimeVersion,
        SplitDebugFilename, EmissionKind, EnumTypes, RetainedTypes,
        GlobalVariables, ImportedEntities, Macros, DWOId, SplitDebugInlining,
-       DebugInfoForProfiling, NameTableKind, RangesBaseAddress, SysRoot, SDK))
+       DebugInfoForProfiling, NameTableKind, RangesBaseAddress, SysRoot, SDK,
+       DwarfProcedures))
 
   TempDICompileUnit clone() const { return cloneImpl(); }
 
@@ -2190,6 +2195,9 @@ public:
   }
   StringRef getSysRoot() const { return getStringOperand(9); }
   StringRef getSDK() const { return getStringOperand(10); }
+  DINodeArray getDwarfProcedures() const {
+    return cast_or_null<MDTuple>(getRawDwarfProcedures());
+  }
 
   MDString *getRawProducer() const { return getOperandAs<MDString>(1); }
   MDString *getRawFlags() const { return getOperandAs<MDString>(2); }
@@ -2203,6 +2211,7 @@ public:
   Metadata *getRawMacros() const { return getOperand(8); }
   MDString *getRawSysRoot() const { return getOperandAs<MDString>(9); }
   MDString *getRawSDK() const { return getOperandAs<MDString>(10); }
+  Metadata *getRawDwarfProcedures() const { return getOperand(11); }
 
   /// Replace arrays.
   ///
@@ -2221,6 +2230,9 @@ public:
     replaceOperandWith(7, N.get());
   }
   void replaceMacros(DIMacroNodeArray N) { replaceOperandWith(8, N.get()); }
+  void replaceDwarfProcedures(DINodeArray N) {
+    replaceOperandWith(11, N.get());
+  }
   /// @}
 
   static bool classof(const Metadata *MD) {
@@ -3424,6 +3436,53 @@ public:
   static bool classof(const Metadata *MD) {
     return MD->getMetadataID() == DILocalVariableKind ||
            MD->getMetadataID() == DIGlobalVariableKind;
+  }
+};
+
+/// A reusable DWARF procedure body (DW_TAG_dwarf_procedure).
+///
+/// Holds a DIExpression that will be emitted as the body of a
+/// DW_TAG_dwarf_procedure DIE. Owned by a DICompileUnit.
+class DIDwarfProcedure : public DINode {
+  friend class LLVMContextImpl;
+  friend class MDNode;
+
+  DIDwarfProcedure(LLVMContext &C, StorageType Storage,
+                   ArrayRef<Metadata *> Ops);
+  ~DIDwarfProcedure() = default;
+
+  static DIDwarfProcedure *getImpl(LLVMContext &Context, StringRef Name,
+                                   Metadata *Expression, StorageType Storage,
+                                   bool ShouldCreate = true) {
+    return getImpl(Context, getCanonicalMDString(Context, Name), Expression,
+                   Storage, ShouldCreate);
+  }
+  LLVM_ABI static DIDwarfProcedure *
+  getImpl(LLVMContext &Context, MDString *Name, Metadata *Expression,
+          StorageType Storage, bool ShouldCreate = true);
+
+  TempDIDwarfProcedure cloneImpl() const {
+    return getTemporary(getContext(), getRawName(), getRawExpression());
+  }
+
+public:
+  DEFINE_MDNODE_GET(DIDwarfProcedure, (StringRef Name, Metadata *Expression),
+                    (Name, Expression))
+  DEFINE_MDNODE_GET(DIDwarfProcedure, (MDString * Name, Metadata *Expression),
+                    (Name, Expression))
+
+  TempDIDwarfProcedure clone() const { return cloneImpl(); }
+
+  StringRef getName() const { return getStringOperand(0); }
+  DIExpression *getExpression() const {
+    return cast_or_null<DIExpression>(getRawExpression());
+  }
+
+  MDString *getRawName() const { return getOperandAs<MDString>(0); }
+  Metadata *getRawExpression() const { return getOperand(1); }
+
+  static bool classof(const Metadata *MD) {
+    return MD->getMetadataID() == DIDwarfProcedureKind;
   }
 };
 

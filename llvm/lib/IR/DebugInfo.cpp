@@ -215,6 +215,8 @@ void DebugInfoFinder::processCompileUnit(DICompileUnit *CU) {
     processImportedEntity(Import);
   for (auto *Macro : CU->getMacros())
     processMacroNode(Macro, nullptr);
+  // DwarfProcedures: no processing needed — procedures don't reference
+  // types/scopes.
 }
 
 void DebugInfoFinder::processInstruction(const Module &M,

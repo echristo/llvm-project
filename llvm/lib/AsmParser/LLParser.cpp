@@ -6152,7 +6152,8 @@ bool LLParser::parseDICompileUnit(MDNode *&Result, bool IsDistinct) {
   OPTIONAL(nameTableKind, NameTableKindField, );                               \
   OPTIONAL(rangesBaseAddress, MDBoolField, = false);                           \
   OPTIONAL(sysroot, MDStringField, );                                          \
-  OPTIONAL(sdk, MDStringField, );
+  OPTIONAL(sdk, MDStringField, );                                              \
+  OPTIONAL(dwarfProcedures, MDField, );
   PARSE_MD_FIELDS();
 #undef VISIT_MD_FIELDS
 
@@ -6177,7 +6178,22 @@ bool LLParser::parseDICompileUnit(MDNode *&Result, bool IsDistinct) {
       splitDebugFilename.Val, emissionKind.Val, enums.Val, retainedTypes.Val,
       globals.Val, imports.Val, macros.Val, dwoId.Val, splitDebugInlining.Val,
       debugInfoForProfiling.Val, nameTableKind.Val, rangesBaseAddress.Val,
-      sysroot.Val, sdk.Val);
+      sysroot.Val, sdk.Val, dwarfProcedures.Val);
+  return false;
+}
+
+/// parseDIDwarfProcedure:
+///   ::= !DIDwarfProcedure(name: "foo",
+///                         expression: !DIExpression(DW_OP_deref))
+bool LLParser::parseDIDwarfProcedure(MDNode *&Result, bool IsDistinct) {
+#define VISIT_MD_FIELDS(OPTIONAL, REQUIRED)                                    \
+  OPTIONAL(name, MDStringField, );                                             \
+  REQUIRED(expression, MDField, );
+  PARSE_MD_FIELDS();
+#undef VISIT_MD_FIELDS
+
+  Result =
+      GET_OR_DISTINCT(DIDwarfProcedure, (Context, name.Val, expression.Val));
   return false;
 }
 

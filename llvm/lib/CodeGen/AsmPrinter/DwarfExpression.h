@@ -134,6 +134,12 @@ protected:
 
   virtual void emitBaseTypeRef(uint64_t Idx) = 0;
 
+  /// Emit a DW_OP_call4 operand referencing a DW_TAG_dwarf_procedure.
+  /// For DIE path: adds a DIEEntry with DW_FORM_ref4.
+  /// For loc list path: emits a 4-byte index placeholder into ExprRefedDIEs,
+  /// resolved later by DwarfDebug::emitDebugLocEntry.
+  virtual void emitProcedureRef(unsigned Idx) = 0;
+
   /// Start emitting data to the temporary buffer. The data stored in the
   /// temporary buffer can be committed to the main output using
   /// commitTemporaryBuffer().
@@ -299,6 +305,12 @@ public:
   void emitLegacySExt(unsigned FromBits);
   void emitLegacyZExt(unsigned FromBits);
 
+  /// Inline a DIDwarfProcedure body into the output stream. Used when
+  /// DW_OP_LLVM_call_procedure is emitted with procedures disabled or
+  /// DWARF version < 3. Procedure bodies contain only standard DWARF ops
+  /// (enforced by the verifier).
+  void emitDwarfProcedureBody(const DIExpression *Expr);
+
   /// Emit location information expressed via WebAssembly location + offset
   /// The Index is an identifier for locals, globals or operand stack.
   void addWasmLocation(unsigned Index, uint64_t Offset);
@@ -327,6 +339,7 @@ class DebugLocDwarfExpression final : public DwarfExpression {
   void emitUnsigned(uint64_t Value) override;
   void emitData1(uint8_t Value) override;
   void emitBaseTypeRef(uint64_t Idx) override;
+  void emitProcedureRef(unsigned Idx) override;
 
   void enableTemporaryBuffer() override;
   void disableTemporaryBuffer() override;
@@ -357,6 +370,7 @@ class DIEDwarfExpression final : public DwarfExpression {
   void emitUnsigned(uint64_t Value) override;
   void emitData1(uint8_t Value) override;
   void emitBaseTypeRef(uint64_t Idx) override;
+  void emitProcedureRef(unsigned Idx) override;
 
   void enableTemporaryBuffer() override;
   void disableTemporaryBuffer() override;

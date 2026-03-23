@@ -889,6 +889,9 @@ public:
     return EnableOpConvert;
   }
 
+  /// Returns whether DW_TAG_dwarf_procedure emission is enabled.
+  bool useDwarfProcedures() const;
+
   bool shareAcrossDWOCUs() const;
 
   /// Returns the Dwarf Version.

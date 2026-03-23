@@ -55,6 +55,7 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Triple.h"
 #include <cstddef>
+#include <cstring>
 #include <iterator>
 #include <optional>
 #include <string>
@@ -82,6 +83,11 @@ static cl::opt<bool>
 static cl::opt<bool> SplitDwarfCrossCuReferences(
     "split-dwarf-cross-cu-references", cl::Hidden,
     cl::desc("Enable cross-cu references in DWO files"), cl::init(false));
+
+static cl::opt<bool>
+    UseDwarfProcedures("use-dwarf-procedures", cl::Hidden,
+                       cl::desc("Emit DW_TAG_dwarf_procedure DIEs"),
+                       cl::init(true));
 
 enum DefaultOnOff { Default, Enable, Disable };
 
@@ -197,6 +203,16 @@ void DebugLocDwarfExpression::emitData1(uint8_t Value) {
 void DebugLocDwarfExpression::emitBaseTypeRef(uint64_t Idx) {
   assert(Idx < (1ULL << (ULEB128PadSize * 7)) && "Idx wont fit");
   getActiveStreamer().emitULEB128(Idx, Twine(Idx), ULEB128PadSize);
+}
+
+void DebugLocDwarfExpression::emitProcedureRef(unsigned Idx) {
+  // Emit index as 4 native bytes. This is an in-process placeholder parsed
+  // by DWARFExpression as Size4 and resolved to the actual CU-relative DIE
+  // offset in DwarfDebug::emitDebugLocEntry.
+  uint8_t Buf[4];
+  std::memcpy(Buf, &Idx, 4);
+  for (uint8_t B : Buf)
+    getActiveStreamer().emitInt8(B, "");
 }
 
 bool DebugLocDwarfExpression::isFrameRegister(const TargetRegisterInfo &TRI,
@@ -543,6 +559,8 @@ template <typename Func> static void forBothCUs(DwarfCompileUnit &CU, Func F) {
 bool DwarfDebug::shareAcrossDWOCUs() const {
   return SplitDwarfCrossCuReferences;
 }
+
+bool DwarfDebug::useDwarfProcedures() const { return UseDwarfProcedures; }
 
 DwarfCompileUnit &
 DwarfDebug::getOrCreateAbstractSubprogramCU(const DISubprogram *SP,
@@ -1288,7 +1306,8 @@ void DwarfDebug::beginModule(Module *M) {
   for (DICompileUnit *CUNode : M->debug_compile_units()) {
     if (CUNode->getImportedEntities().empty() &&
         CUNode->getEnumTypes().empty() && CUNode->getRetainedTypes().empty() &&
-        CUNode->getGlobalVariables().empty() && CUNode->getMacros().empty())
+        CUNode->getGlobalVariables().empty() && CUNode->getMacros().empty() &&
+        !CUNode->getDwarfProcedures())
       continue;
 
     DwarfCompileUnit &CU = getOrCreateDwarfCompileUnit(CUNode);
@@ -1303,6 +1322,16 @@ void DwarfDebug::beginModule(Module *M) {
       if (DIType *RT = dyn_cast<DIType>(Ty))
         // There is no point in force-emitting a forward declaration.
         CU.getOrCreateTypeDIE(RT);
+    }
+
+    // Emit IR-node dwarf procedures when the flag is on and version >= 3.
+    if (UseDwarfProcedures && getDwarfVersion() >= 3) {
+      if (auto DPs = CUNode->getDwarfProcedures()) {
+        for (const MDOperand &Op : DPs->operands()) {
+          if (auto *DwP = dyn_cast<DIDwarfProcedure>(Op))
+            CU.getOrCreateDwarfProcedureDIE(DwP);
+        }
+      }
     }
   }
 }

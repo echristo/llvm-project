@@ -1380,6 +1380,22 @@ template <> struct MDNodeKeyImpl<DIExpression> {
   unsigned getHashValue() const { return hash_combine_range(Elements); }
 };
 
+template <> struct MDNodeKeyImpl<DIDwarfProcedure> {
+  MDString *Name;
+  Metadata *Expression;
+
+  MDNodeKeyImpl(MDString *Name, Metadata *Expression)
+      : Name(Name), Expression(Expression) {}
+  MDNodeKeyImpl(const DIDwarfProcedure *N)
+      : Name(N->getRawName()), Expression(N->getRawExpression()) {}
+
+  bool isKeyOf(const DIDwarfProcedure *RHS) const {
+    return Name == RHS->getRawName() && Expression == RHS->getRawExpression();
+  }
+
+  unsigned getHashValue() const { return hash_combine(Name, Expression); }
+};
+
 template <> struct MDNodeKeyImpl<DIGlobalVariableExpression> {
   Metadata *Variable;
   Metadata *Expression;

@@ -402,6 +402,9 @@ private:
                     SmallVectorImpl<uint64_t> &Record, unsigned Abbrev);
   void writeDIExpression(const DIExpression *N,
                          SmallVectorImpl<uint64_t> &Record, unsigned Abbrev);
+  void writeDIDwarfProcedure(const DIDwarfProcedure *N,
+                             SmallVectorImpl<uint64_t> &Record,
+                             unsigned Abbrev);
   void writeDIGlobalVariableExpression(const DIGlobalVariableExpression *N,
                                        SmallVectorImpl<uint64_t> &Record,
                                        unsigned Abbrev);
@@ -2160,6 +2163,7 @@ void ModuleBitcodeWriter::writeDICompileUnit(const DICompileUnit *N,
   Record.push_back(VE.getMetadataOrNullID(N->getRawSysRoot()));
   Record.push_back(VE.getMetadataOrNullID(N->getRawSDK()));
   Record.push_back(Lang.hasVersionedName() ? Lang.getVersion() : 0);
+  Record.push_back(VE.getMetadataOrNullID(N->getRawDwarfProcedures()));
 
   Stream.EmitRecord(bitc::METADATA_COMPILE_UNIT, Record, Abbrev);
   Record.clear();
@@ -2411,6 +2415,17 @@ void ModuleBitcodeWriter::writeDIExpression(const DIExpression *N,
   Record.append(N->elements_begin(), N->elements_end());
 
   Stream.EmitRecord(bitc::METADATA_EXPRESSION, Record, Abbrev);
+  Record.clear();
+}
+
+void ModuleBitcodeWriter::writeDIDwarfProcedure(
+    const DIDwarfProcedure *N, SmallVectorImpl<uint64_t> &Record,
+    unsigned Abbrev) {
+  Record.push_back(N->isDistinct());
+  Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
+  Record.push_back(VE.getMetadataOrNullID(N->getRawExpression()));
+
+  Stream.EmitRecord(bitc::METADATA_DWARF_PROCEDURE, Record, Abbrev);
   Record.clear();
 }
 

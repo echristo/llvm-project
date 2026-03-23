@@ -2459,6 +2459,16 @@ static void writeDICompileUnit(raw_ostream &Out, const DICompileUnit *N,
   Printer.printBool("rangesBaseAddress", N->getRangesBaseAddress(), false);
   Printer.printString("sysroot", N->getSysRoot());
   Printer.printString("sdk", N->getSDK());
+  Printer.printMetadata("dwarfProcedures", N->getRawDwarfProcedures());
+  Out << ")";
+}
+
+static void writeDIDwarfProcedure(raw_ostream &Out, const DIDwarfProcedure *N,
+                                  AsmWriterContext &WriterCtx) {
+  Out << "!DIDwarfProcedure(";
+  MDFieldPrinter Printer(Out, WriterCtx);
+  Printer.printString("name", N->getName());
+  Printer.printMetadata("expression", N->getRawExpression());
   Out << ")";
 }
 

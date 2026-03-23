@@ -54,6 +54,7 @@ namespace llvm {
     SmallVector<TrackingMDNodeRef, 4> AllRetainTypes;
     SmallVector<DISubprogram *, 4> AllSubprograms;
     SmallVector<Metadata *, 4> AllGVs;
+    SmallVector<Metadata *, 4> AllDwarfProcedures;
     SmallVector<TrackingMDNodeRef, 4> ImportedModules;
     /// Map Macro parent (which can be DIMacroFile or nullptr) to a list of
     /// Metadata all of type DIMacroNode.
@@ -892,6 +893,16 @@ namespace llvm {
                                DIGenericSubrange::BoundType LowerBound,
                                DIGenericSubrange::BoundType UpperBound,
                                DIGenericSubrange::BoundType Stride);
+
+    /// Create a DWARF procedure — a reusable expression body
+    /// referenced from variable locations via DW_OP_LLVM_call_procedure.
+    /// \param Name  Optional procedure name (empty for anonymous).
+    /// \param Body  The expression body. Must be a pure stack computation
+    ///              — the verifier rejects DW_OP_LLVM_fragment,
+    ///              DW_OP_LLVM_arg, DW_OP_LLVM_entry_value, and
+    ///              DW_OP_LLVM_call_procedure in procedure bodies.
+    LLVM_ABI DIDwarfProcedure *createDwarfProcedure(StringRef Name,
+                                                     DIExpression *Body);
 
     /// Create a new descriptor for the specified variable.
     /// \param Context     Variable scope.

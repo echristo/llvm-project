@@ -34,6 +34,8 @@ DIBuilder::DIBuilder(Module &m, bool AllowUnresolvedNodes, DICompileUnit *CU)
       AllRetainTypes.assign(RTs.begin(), RTs.end());
     if (const auto &GVs = CUNode->getGlobalVariables())
       AllGVs.assign(GVs.begin(), GVs.end());
+    if (const auto &DPs = CUNode->getDwarfProcedures())
+      AllDwarfProcedures.assign(DPs.begin(), DPs.end());
     if (const auto &IMs = CUNode->getImportedEntities())
       ImportedModules.assign(IMs.begin(), IMs.end());
     if (const auto &MNs = CUNode->getMacros())
@@ -105,6 +107,10 @@ void DIBuilder::finalize() {
 
   if (!AllGVs.empty())
     CUNode->replaceGlobalVariables(MDTuple::get(VMContext, AllGVs));
+
+  if (!AllDwarfProcedures.empty())
+    CUNode->replaceDwarfProcedures(
+        MDTuple::get(VMContext, AllDwarfProcedures));
 
   if (!ImportedModules.empty())
     CUNode->replaceImportedEntities(MDTuple::get(
@@ -960,6 +966,14 @@ DIGlobalVariableExpression *DIBuilder::createGlobalVariableExpression(
   auto *N = DIGlobalVariableExpression::get(VMContext, GV, Expr);
   AllGVs.push_back(N);
   return N;
+}
+
+DIDwarfProcedure *DIBuilder::createDwarfProcedure(StringRef Name,
+                                                   DIExpression *Body) {
+  assert(Body && "Expected non-null expression body for DWARF procedure");
+  auto *DP = DIDwarfProcedure::get(VMContext, Name, Body);
+  AllDwarfProcedures.push_back(DP);
+  return DP;
 }
 
 DIGlobalVariable *DIBuilder::createTempGlobalVariableFwdDecl(

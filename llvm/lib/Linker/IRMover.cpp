@@ -1108,6 +1108,7 @@ void IRLinker::prepareCompileUnitsForImport() {
     CU->replaceEnumTypes(nullptr);
     CU->replaceMacros(nullptr);
     CU->replaceRetainedTypes(nullptr);
+    CU->replaceDwarfProcedures(nullptr);
 
     // The original definition (or at least its debug info - if the variable is
     // internalized and optimized away) will remain in the source module, so

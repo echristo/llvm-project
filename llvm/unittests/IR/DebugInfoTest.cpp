@@ -1418,6 +1418,97 @@ TEST(DIBuilder, CompositeTypes) {
   EXPECT_EQ(Enum->getTag(), dwarf::DW_TAG_enumeration_type);
 }
 
+TEST(DIBuilder, CreateDwarfProcedure) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M(new Module("MyModule", Ctx));
+  DIBuilder DIB(*M);
+
+  DIFile *F = DIB.createFile("main.c", "/");
+  DICompileUnit *CU = DIB.createCompileUnit(
+      DISourceLanguageName(dwarf::DW_LANG_C), F, "llvm-test", false, "", 0);
+
+  // Create two procedures with different expressions.
+  DIExpression *Body1 =
+      DIB.createExpression({dwarf::DW_OP_deref, dwarf::DW_OP_plus_uconst, 16});
+  DIDwarfProcedure *DP1 = DIB.createDwarfProcedure("my_proc", Body1);
+  EXPECT_TRUE(isa_and_nonnull<DIDwarfProcedure>(DP1));
+  EXPECT_TRUE(isa<DINode>(DP1));
+  EXPECT_EQ(DP1->getName(), "my_proc");
+  EXPECT_EQ(DP1->getExpression(), Body1);
+
+  DIExpression *Body2 = DIB.createExpression({dwarf::DW_OP_deref});
+  DIDwarfProcedure *DP2 = DIB.createDwarfProcedure("", Body2);
+  EXPECT_TRUE(isa_and_nonnull<DIDwarfProcedure>(DP2));
+  EXPECT_EQ(DP2->getName(), "");
+  EXPECT_EQ(DP2->getExpression(), Body2);
+
+  DIB.finalize();
+
+  // Read back from the CU and verify ordering and content.
+  auto DPs = CU->getDwarfProcedures();
+  ASSERT_TRUE(DPs);
+  ASSERT_EQ(DPs->getNumOperands(), 2u);
+
+  auto *ReadDP0 = cast<DIDwarfProcedure>(DPs->getOperand(0));
+  EXPECT_EQ(ReadDP0->getName(), "my_proc");
+  EXPECT_EQ(ReadDP0->getExpression(), Body1);
+
+  auto *ReadDP1 = cast<DIDwarfProcedure>(DPs->getOperand(1));
+  EXPECT_EQ(ReadDP1->getName(), "");
+  EXPECT_EQ(ReadDP1->getExpression(), Body2);
+}
+
+TEST(DIBuilder, CreateDwarfProcedureEmpty) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M(new Module("MyModule", Ctx));
+  DIBuilder DIB(*M);
+
+  DIFile *F = DIB.createFile("main.c", "/");
+  DIB.createCompileUnit(DISourceLanguageName(dwarf::DW_LANG_C), F,
+                        "llvm-test", false, "", 0);
+
+  DIB.finalize();
+
+  // CU should have no dwarf procedures when none were created.
+  auto *CU = (*M->debug_compile_units_begin());
+  EXPECT_EQ(CU->getDwarfProcedures().get(), nullptr);
+}
+
+TEST(DIBuilder, CreateDwarfProcedureReuse) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M(new Module("MyModule", Ctx));
+
+  DIFile *F;
+  DICompileUnit *CU;
+  {
+    DIBuilder DIB(*M);
+    F = DIB.createFile("main.c", "/");
+    CU = DIB.createCompileUnit(DISourceLanguageName(dwarf::DW_LANG_C), F,
+                               "llvm-test", false, "", 0);
+    DIExpression *Body1 =
+        DIB.createExpression({dwarf::DW_OP_deref});
+    DIB.createDwarfProcedure("first", Body1);
+    DIB.finalize();
+  }
+
+  // Create a second DIBuilder against the same CU and add another procedure.
+  {
+    DIBuilder DIB2(*M, true, CU);
+    DIExpression *Body2 =
+        DIB2.createExpression({dwarf::DW_OP_plus_uconst, 8});
+    DIB2.createDwarfProcedure("second", Body2);
+    DIB2.finalize();
+  }
+
+  // Both procedures should be present.
+  auto DPs = CU->getDwarfProcedures();
+  ASSERT_TRUE(DPs);
+  ASSERT_EQ(DPs->getNumOperands(), 2u);
+
+  EXPECT_EQ(cast<DIDwarfProcedure>(DPs->getOperand(0))->getName(), "first");
+  EXPECT_EQ(cast<DIDwarfProcedure>(DPs->getOperand(1))->getName(), "second");
+}
+
 TEST(DIBuilder, DynamicOffsetAndSize) {
   LLVMContext Ctx;
   auto M = std::make_unique<Module>("MyModule", Ctx);

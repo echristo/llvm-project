@@ -2978,6 +2978,63 @@ TEST_F(DICompileUnitTest, replaceArrays) {
   EXPECT_EQ(Macros, N->getMacros().get());
   N->replaceMacros(nullptr);
   EXPECT_EQ(nullptr, N->getMacros().get());
+
+  auto *DwarfProcedures = MDTuple::getDistinct(Context, {});
+  EXPECT_EQ(nullptr, N->getDwarfProcedures().get());
+  N->replaceDwarfProcedures(DwarfProcedures);
+  EXPECT_EQ(DwarfProcedures, N->getDwarfProcedures().get());
+  N->replaceDwarfProcedures(nullptr);
+  EXPECT_EQ(nullptr, N->getDwarfProcedures().get());
+}
+
+typedef MetadataTest DIDwarfProcedureTest;
+
+TEST_F(DIDwarfProcedureTest, get) {
+  DIExpression *Expr = DIExpression::get(Context, {dwarf::DW_OP_deref});
+  StringRef Name = "test_proc";
+
+  auto *N = DIDwarfProcedure::get(Context, Name, Expr);
+
+  EXPECT_EQ(dwarf::DW_TAG_dwarf_procedure, N->getTag());
+  EXPECT_EQ(Name, N->getName());
+  EXPECT_EQ(Expr, N->getExpression());
+
+  // Uniquing: same args -> same pointer.
+  EXPECT_EQ(N, DIDwarfProcedure::get(Context, Name, Expr));
+
+  // Different name -> different pointer.
+  EXPECT_NE(N, DIDwarfProcedure::get(Context, "other", Expr));
+
+  // Different expression -> different pointer.
+  auto *Expr2 = DIExpression::get(Context, {dwarf::DW_OP_lit0});
+  EXPECT_NE(N, DIDwarfProcedure::get(Context, Name, Expr2));
+
+  // Anonymous procedure (nullptr name).
+  auto *Anon = DIDwarfProcedure::get(Context, nullptr, Expr);
+  EXPECT_TRUE(Anon->getName().empty());
+  EXPECT_EQ(Expr, Anon->getExpression());
+
+  // Two anonymous procedures with the same expression uniquify.
+  EXPECT_EQ(Anon, DIDwarfProcedure::get(Context, nullptr, Expr));
+
+  // clone() round-trips.
+  TempDIDwarfProcedure Temp = N->clone();
+  EXPECT_EQ(N, MDNode::replaceWithUniqued(std::move(Temp)));
+}
+
+TEST_F(DIDwarfProcedureTest, callProcedureExpression) {
+  // DW_OP_LLVM_call_procedure takes one argument (procedure index).
+  auto *Expr =
+      DIExpression::get(Context, {dwarf::DW_OP_LLVM_call_procedure, 0});
+  ASSERT_TRUE(Expr->isValid());
+  ASSERT_EQ(2u, Expr->getNumElements());
+  EXPECT_EQ((uint64_t)dwarf::DW_OP_LLVM_call_procedure, Expr->getElement(0));
+  EXPECT_EQ(0u, Expr->getElement(1));
+
+  // With stack_value suffix.
+  auto *Expr2 = DIExpression::get(
+      Context, {dwarf::DW_OP_LLVM_call_procedure, 1, dwarf::DW_OP_stack_value});
+  ASSERT_TRUE(Expr2->isValid());
 }
 
 typedef MetadataTest DISubprogramTest;

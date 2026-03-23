@@ -61,6 +61,11 @@ void DIEDwarfExpression::emitBaseTypeRef(uint64_t Idx) {
   CU.addBaseTypeRef(getActiveDIE(), Idx);
 }
 
+void DIEDwarfExpression::emitProcedureRef(unsigned Idx) {
+  assert(Idx < CU.ExprRefedDIEs.size() && "procedure ref index out of range");
+  CU.addProcedureRef(getActiveDIE(), *CU.ExprRefedDIEs[Idx]);
+}
+
 void DIEDwarfExpression::enableTemporaryBuffer() {
   assert(!IsBuffering && "Already buffering?");
   IsBuffering = true;

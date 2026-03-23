@@ -224,6 +224,27 @@ public:
 
   std::vector<BaseTypeRef> ExprRefedBaseTypes;
 
+  /// DIEs referenced from expressions via DW_OP_call4.
+  /// Indices into this vector are stored as placeholders during location list
+  /// expression emission and resolved to CU-relative offsets in
+  /// DwarfDebug::emitDebugLocEntry.
+  SmallVector<DIE *, 4> ExprRefedDIEs;
+
+  /// Reverse map from DIE pointer to index in ExprRefedDIEs.
+  DenseMap<DIE *, unsigned> ExprRefedDIEIndex;
+
+  /// Add a DW_OP_call4 procedure reference into a DIE location expression.
+  /// Uses DIEEntry with DW_FORM_ref4 for deferred CU-relative offset
+  /// resolution.
+  void addProcedureRef(DIEValueList &Die, DIE &ProcDie);
+
+  /// Get or create a DW_TAG_dwarf_procedure DIE from an IR metadata node.
+  /// Registers the DIE in ExprRefedDIEs at creation time.
+  DIE *getOrCreateDwarfProcedureDIE(const DIDwarfProcedure *DP);
+
+  /// Look up the ExprRefedDIEs index for a previously registered procedure DIE.
+  unsigned getExprRefedDIEIndex(DIE *ProcDie) const;
+
   /// Get or create global variable DIE.
   DIE *
   getOrCreateGlobalVariableDIE(const DIGlobalVariable *GV,

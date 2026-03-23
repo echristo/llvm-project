@@ -1009,6 +1009,7 @@ MetadataLoader::MetadataLoaderImpl::lazyLoadModuleMetadataBlock() {
       case bitc::METADATA_IMPORTED_ENTITY:
       case bitc::METADATA_GLOBAL_VAR_EXPR:
       case bitc::METADATA_GENERIC_SUBRANGE:
+      case bitc::METADATA_DWARF_PROCEDURE:
         // We don't expect to see any of these, if we see one, give up on
         // lazy-loading and fallback.
         MDStringRef.clear();
@@ -1941,7 +1942,7 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
     break;
   }
   case bitc::METADATA_COMPILE_UNIT: {
-    if (Record.size() < 14 || Record.size() > 23)
+    if (Record.size() < 14 || Record.size() > 24)
       return error("Invalid record");
 
     // Ignore Record[0], which indicates whether this compile unit is
@@ -1969,7 +1970,8 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
         Record.size() <= 18 ? 0 : Record[18],
         Record.size() <= 19 ? false : Record[19],
         Record.size() <= 20 ? nullptr : getMDString(Record[20]),
-        Record.size() <= 21 ? nullptr : getMDString(Record[21]));
+        Record.size() <= 21 ? nullptr : getMDString(Record[21]),
+        Record.size() <= 23 ? nullptr : getMDOrNull(Record[23]));
 
     MetadataList.assignValue(CU, NextMetadataNo);
     NextMetadataNo++;
@@ -2380,6 +2382,18 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
 
     MetadataList.assignValue(GET_OR_DISTINCT(DIExpression, (Context, Elts)),
                              NextMetadataNo);
+    NextMetadataNo++;
+    break;
+  }
+  case bitc::METADATA_DWARF_PROCEDURE: {
+    if (Record.size() != 3)
+      return error("Invalid record");
+
+    IsDistinct = Record[0];
+    MetadataList.assignValue(
+        GET_OR_DISTINCT(DIDwarfProcedure, (Context, getMDString(Record[1]),
+                                           getMDOrNull(Record[2]))),
+        NextMetadataNo);
     NextMetadataNo++;
     break;
   }

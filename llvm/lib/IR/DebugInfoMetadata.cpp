@@ -1230,7 +1230,8 @@ DICompileUnit *DICompileUnit::getImpl(
     Metadata *GlobalVariables, Metadata *ImportedEntities, Metadata *Macros,
     uint64_t DWOId, bool SplitDebugInlining, bool DebugInfoForProfiling,
     unsigned NameTableKind, bool RangesBaseAddress, MDString *SysRoot,
-    MDString *SDK, StorageType Storage, bool ShouldCreate) {
+    MDString *SDK, Metadata *DwarfProcedures, StorageType Storage,
+    bool ShouldCreate) {
   assert(Storage != Uniqued && "Cannot unique DICompileUnit");
   assert(isCanonical(Producer) && "Expected canonical MDString");
   assert(isCanonical(Flags) && "Expected canonical MDString");
@@ -1246,13 +1247,30 @@ DICompileUnit *DICompileUnit::getImpl(
                      ImportedEntities,
                      Macros,
                      SysRoot,
-                     SDK};
+                     SDK,
+                     DwarfProcedures};
   return storeImpl(new (std::size(Ops), Storage) DICompileUnit(
                        Context, Storage, SourceLanguage, IsOptimized,
                        RuntimeVersion, EmissionKind, DWOId, SplitDebugInlining,
                        DebugInfoForProfiling, NameTableKind, RangesBaseAddress,
                        Ops),
                    Storage);
+}
+
+DIDwarfProcedure::DIDwarfProcedure(LLVMContext &C, StorageType Storage,
+                                   ArrayRef<Metadata *> Ops)
+    : DINode(C, DIDwarfProcedureKind, Storage, dwarf::DW_TAG_dwarf_procedure,
+             Ops) {}
+
+DIDwarfProcedure *DIDwarfProcedure::getImpl(LLVMContext &Context,
+                                            MDString *Name,
+                                            Metadata *Expression,
+                                            StorageType Storage,
+                                            bool ShouldCreate) {
+  assert(isCanonical(Name) && "Expected canonical MDString");
+  DEFINE_GETIMPL_LOOKUP(DIDwarfProcedure, (Name, Expression));
+  Metadata *Ops[] = {Name, Expression};
+  DEFINE_GETIMPL_STORE_NO_CONSTRUCTOR_ARGS(DIDwarfProcedure, Ops);
 }
 
 std::optional<DICompileUnit::DebugEmissionKind>
@@ -1770,6 +1788,7 @@ unsigned DIExpression::ExprOperand::getSize() const {
   case dwarf::DW_OP_LLVM_tag_offset:
   case dwarf::DW_OP_LLVM_entry_value:
   case dwarf::DW_OP_LLVM_arg:
+  case dwarf::DW_OP_LLVM_call_procedure:
   case dwarf::DW_OP_regx:
     return 2;
   default:
@@ -1833,6 +1852,7 @@ bool DIExpression::isValid() const {
     case dwarf::DW_OP_LLVM_tag_offset:
     case dwarf::DW_OP_LLVM_extract_bits_sext:
     case dwarf::DW_OP_LLVM_extract_bits_zext:
+    case dwarf::DW_OP_LLVM_call_procedure:
     case dwarf::DW_OP_constu:
     case dwarf::DW_OP_plus_uconst:
     case dwarf::DW_OP_plus:

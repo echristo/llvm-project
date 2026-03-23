@@ -20,7 +20,9 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/LEB128.h"
 #include <algorithm>
+#include <cstring>
 
 using namespace llvm;
 
@@ -621,6 +623,28 @@ bool DwarfExpression::addExpression(
       LocationKind = Implicit;
       break;
     }
+    case dwarf::DW_OP_LLVM_call_procedure: {
+      uint64_t ProcIdx = Op->getArg(0);
+      auto DPs = CU.getCUNode()->getDwarfProcedures();
+      assert(DPs && ProcIdx < DPs->getNumOperands() &&
+             "call_procedure index out of range");
+      auto *DP = cast<DIDwarfProcedure>(DPs->getOperand(ProcIdx));
+
+      if (!CU.getDwarfDebug().useDwarfProcedures() || DwarfVersion < 3) {
+        // Inline the procedure body at the call site.
+        if (DIExpression *Body = DP->getExpression())
+          emitDwarfProcedureBody(Body);
+        break;
+      }
+
+      // Emit DW_OP_call4 referencing the procedure DIE.
+      DIE *ProcDie = CU.getOrCreateDwarfProcedureDIE(DP);
+      assert(ProcDie && "procedure DIE should exist at DwarfVersion >= 3");
+      unsigned RefIdx = CU.getExprRefedDIEIndex(ProcDie);
+      emitOp(dwarf::DW_OP_call4);
+      emitProcedureRef(RefIdx);
+      break;
+    }
     case dwarf::DW_OP_plus_uconst:
       assert(!isRegisterLocation());
       emitOp(dwarf::DW_OP_plus_uconst);
@@ -809,6 +833,41 @@ void DwarfExpression::emitLegacyZExt(unsigned FromBits) {
     emitOp(dwarf::DW_OP_minus);
   }
   emitOp(dwarf::DW_OP_and);
+}
+
+void DwarfExpression::emitDwarfProcedureBody(const DIExpression *Expr) {
+  for (auto &Op : Expr->expr_ops()) {
+    uint64_t OpCode = Op.getOp();
+    assert(OpCode < dwarf::DW_OP_LLVM_fragment &&
+           "LLVM-internal op in procedure body");
+    emitOp(OpCode);
+
+    // Handle breg0-breg31: one SLEB128 argument.
+    if (OpCode >= dwarf::DW_OP_breg0 && OpCode <= dwarf::DW_OP_breg31) {
+      emitSigned(Op.getArg(0));
+      continue;
+    }
+
+    switch (OpCode) {
+    default:
+      break;
+    case dwarf::DW_OP_constu:
+    case dwarf::DW_OP_plus_uconst:
+    case dwarf::DW_OP_regx:
+      emitUnsigned(Op.getArg(0));
+      break;
+    case dwarf::DW_OP_consts:
+      emitSigned(Op.getArg(0));
+      break;
+    case dwarf::DW_OP_deref_size:
+      emitData1(Op.getArg(0));
+      break;
+    case dwarf::DW_OP_bregx:
+      emitUnsigned(Op.getArg(0));
+      emitSigned(Op.getArg(1));
+      break;
+    }
+  }
 }
 
 void DwarfExpression::addWasmLocation(unsigned Index, uint64_t Offset) {

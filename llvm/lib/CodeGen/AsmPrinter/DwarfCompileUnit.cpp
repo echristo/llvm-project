@@ -1891,6 +1891,51 @@ void DwarfCompileUnit::addAddrTableBase() {
                   Label, TLOF.getDwarfAddrSection()->getBeginSymbol());
 }
 
+DIE *DwarfCompileUnit::getOrCreateDwarfProcedureDIE(
+    const DIDwarfProcedure *DP) {
+  if (DIE *Existing = getDIE(DP))
+    return Existing;
+
+  if (DD->getDwarfVersion() < 3)
+    return nullptr;
+
+  DIE &Die = createAndAddDIE(dwarf::DW_TAG_dwarf_procedure, getUnitDie(), DP);
+
+  if (!DP->getName().empty())
+    addString(Die, dwarf::DW_AT_name, DP->getName());
+
+  if (DIExpression *Expr = DP->getExpression()) {
+    // Emit the expression body via DIEDwarfExpression. We use
+    // emitDwarfProcedureBody rather than addExpression because
+    // addExpression applies location-kind semantics (e.g., consuming a
+    // trailing DW_OP_deref as a memory dereference) that are
+    // inappropriate for procedure bodies, which are pure stack
+    // computations.
+    auto *Loc = new (DIEValueAllocator) DIELoc;
+    DIEDwarfExpression DwarfExpr(*Asm, *this, *Loc);
+    DwarfExpr.emitDwarfProcedureBody(Expr);
+    addBlock(Die, dwarf::DW_AT_location, Loc);
+  }
+
+  // Register in ExprRefedDIEs so DW_OP_LLVM_call_procedure can find it.
+  unsigned Idx = ExprRefedDIEs.size();
+  ExprRefedDIEs.push_back(&Die);
+  ExprRefedDIEIndex[&Die] = Idx;
+
+  return &Die;
+}
+
+unsigned DwarfCompileUnit::getExprRefedDIEIndex(DIE *ProcDie) const {
+  auto It = ExprRefedDIEIndex.find(ProcDie);
+  assert(It != ExprRefedDIEIndex.end() && "DIE not registered");
+  return It->second;
+}
+
+void DwarfCompileUnit::addProcedureRef(DIEValueList &Die, DIE &ProcDie) {
+  addAttribute(Die, static_cast<dwarf::Attribute>(0), dwarf::DW_FORM_ref4,
+               DIEEntry(ProcDie));
+}
+
 void DwarfCompileUnit::addBaseTypeRef(DIEValueList &Die, int64_t Idx) {
   addAttribute(Die, (dwarf::Attribute)0, dwarf::DW_FORM_udata,
                new (DIEValueAllocator) DIEBaseTypeRef(this, Idx));
