@@ -15,6 +15,7 @@
 
 #include "ByteStreamer.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include <cassert>
@@ -305,11 +306,22 @@ public:
   void emitLegacySExt(unsigned FromBits);
   void emitLegacyZExt(unsigned FromBits);
 
-  /// Inline a DIDwarfProcedure body into the output stream. Used when
-  /// DW_OP_LLVM_call_procedure is emitted with procedures disabled or
-  /// DWARF version < 3. Procedure bodies contain only standard DWARF ops
-  /// (enforced by the verifier).
+  /// Emit a DWARF procedure body into the output stream. For bodies
+  /// containing only standard DWARF ops, emits directly. For bodies that
+  /// contain DW_OP_LLVM_call_procedure, delegates to the private impl
+  /// with in-flight cycle tracking.
   void emitDwarfProcedureBody(const DIExpression *Expr);
+
+private:
+  /// Emit a DWARF procedure body with in-flight tracking for the inline
+  /// fallback path. InFlight tracks procedures currently being inlined to
+  /// prevent cycles. The verifier rejects cycles, but this is defense in
+  /// depth for malformed bitcode that bypasses verification.
+  void emitDwarfProcedureBodyImpl(
+      const DIExpression *Expr,
+      SmallPtrSetImpl<const DIDwarfProcedure *> &InFlight);
+
+public:
 
   /// Emit location information expressed via WebAssembly location + offset
   /// The Index is an identifier for locals, globals or operand stack.

@@ -561,6 +561,14 @@ private:
   void visitDILexicalBlockBase(const DILexicalBlockBase &N);
   void visitDITemplateParameter(const DITemplateParameter &N);
 
+  /// Verify that the DWARF procedure call graph within a compile unit is
+  /// acyclic and all call_procedure indices are in range. The DWARF spec
+  /// (Section 2.5.1.5) allows DW_OP_call2/call4/call_ref inside procedure
+  /// bodies but is silent on recursion — recursive calls would produce
+  /// infinite evaluation loops in consumers. We enforce acyclicity as a
+  /// producer-side constraint.
+  void verifyDwarfProcedureCallGraph(const DICompileUnit &CU);
+
   void visitTemplateParams(const MDNode &N, const Metadata &RawParams);
 
   void visit(DbgLabelRecord &DLR);
@@ -1653,6 +1661,7 @@ void Verifier::visitDICompileUnit(const DICompileUnit &N) {
       CheckDI(!Op || isa<DIDwarfProcedure>(Op), "invalid dwarf procedure ref",
               &N, Op);
     }
+    verifyDwarfProcedureCallGraph(N);
   }
   CUVisited.insert(&N);
 }
@@ -1666,9 +1675,13 @@ void Verifier::visitDIDwarfProcedure(const DIDwarfProcedure &N) {
   if (auto *Expr = N.getExpression()) {
     // Procedure bodies are pure stack computations emitted as
     // DW_AT_location on a DW_TAG_dwarf_procedure DIE. Reject ops that
-    // are location-description-specific (fragment, entry_value), require
-    // multi-value semantics (LLVM_arg), or would introduce recursion
-    // (call_procedure).
+    // are location-description-specific (fragment, entry_value) or
+    // require multi-value semantics (LLVM_arg).
+    //
+    // DW_OP_LLVM_call_procedure IS allowed — DWARF 5 Section 2.5.1.5
+    // places no restriction on DW_OP_call2/call4/call_ref appearing
+    // inside procedure bodies. Cycle detection is handled separately
+    // by verifyDwarfProcedureCallGraph() at the CU level.
     for (auto &Op : Expr->expr_ops()) {
       CheckDI(Op.getOp() != dwarf::DW_OP_LLVM_fragment,
               "DW_OP_LLVM_fragment invalid in procedure body", &N);
@@ -1676,8 +1689,70 @@ void Verifier::visitDIDwarfProcedure(const DIDwarfProcedure &N) {
               "DW_OP_LLVM_arg invalid in procedure body", &N);
       CheckDI(Op.getOp() != dwarf::DW_OP_LLVM_entry_value,
               "DW_OP_LLVM_entry_value invalid in procedure body", &N);
-      CheckDI(Op.getOp() != dwarf::DW_OP_LLVM_call_procedure,
-              "DW_OP_LLVM_call_procedure invalid in procedure body", &N);
+    }
+  }
+}
+
+void Verifier::verifyDwarfProcedureCallGraph(const DICompileUnit &CU) {
+  DINodeArray DPs = CU.getDwarfProcedures();
+  if (!DPs)
+    return;
+
+  unsigned NumProcs = DPs->getNumOperands();
+  if (NumProcs == 0)
+    return;
+
+  // Build adjacency list and validate indices. Work on indices directly
+  // since the procedure array is an MDTuple indexed by position.
+  SmallVector<SmallVector<unsigned, 2>> Edges(NumProcs);
+  for (unsigned I = 0; I < NumProcs; ++I) {
+    auto *DP = dyn_cast_or_null<DIDwarfProcedure>(DPs->getOperand(I));
+    if (!DP || !DP->getExpression())
+      continue;
+    for (auto &Op : DP->getExpression()->expr_ops()) {
+      if (Op.getOp() != dwarf::DW_OP_LLVM_call_procedure)
+        continue;
+      uint64_t Target = Op.getArg(0);
+      CheckDI(Target < NumProcs,
+              "call_procedure index out of range", DP, &CU);
+      if (Target < NumProcs)
+        Edges[I].push_back(Target);
+    }
+  }
+
+  // DFS with two-color tracking to detect cycles.
+  // Gray = currently on the DFS stack (in-flight), Black = fully visited.
+  enum Color { White, Gray, Black };
+  SmallVector<Color, 8> NodeColor(NumProcs, White);
+
+  // Iterative DFS to avoid deep recursion on pathological inputs.
+  for (unsigned Root = 0; Root < NumProcs; ++Root) {
+    if (NodeColor[Root] != White)
+      continue;
+
+    // Stack holds (node, edge-iterator-index) pairs.
+    SmallVector<std::pair<unsigned, unsigned>, 8> Stack;
+    NodeColor[Root] = Gray;
+    Stack.push_back({Root, 0});
+
+    while (!Stack.empty()) {
+      auto &[Node, EdgeIdx] = Stack.back();
+      if (EdgeIdx < Edges[Node].size()) {
+        unsigned Succ = Edges[Node][EdgeIdx++];
+        if (NodeColor[Succ] == Gray) {
+          // Back edge — cycle detected.
+          auto *DP = cast<DIDwarfProcedure>(DPs->getOperand(Node));
+          auto *Target = cast<DIDwarfProcedure>(DPs->getOperand(Succ));
+          CheckDI(false, "cycle in DWARF procedure call graph", DP, Target,
+                  &CU);
+        } else if (NodeColor[Succ] == White) {
+          NodeColor[Succ] = Gray;
+          Stack.push_back({Succ, 0});
+        }
+      } else {
+        NodeColor[Node] = Black;
+        Stack.pop_back();
+      }
     }
   }
 }

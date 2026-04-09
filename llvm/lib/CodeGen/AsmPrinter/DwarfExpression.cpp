@@ -631,9 +631,14 @@ bool DwarfExpression::addExpression(
       auto *DP = cast<DIDwarfProcedure>(DPs->getOperand(ProcIdx));
 
       if (!CU.getDwarfDebug().useDwarfProcedures() || DwarfVersion < 3) {
-        // Inline the procedure body at the call site.
-        if (DIExpression *Body = DP->getExpression())
-          emitDwarfProcedureBody(Body);
+        // Inline the procedure body at the call site. Use the impl with
+        // in-flight tracking so nested call_procedure ops in the body
+        // are handled with cycle detection.
+        if (DIExpression *Body = DP->getExpression()) {
+          SmallPtrSet<const DIDwarfProcedure *, 4> InFlight;
+          InFlight.insert(DP);
+          emitDwarfProcedureBodyImpl(Body, InFlight);
+        }
         break;
       }
 
@@ -836,8 +841,90 @@ void DwarfExpression::emitLegacyZExt(unsigned FromBits) {
 }
 
 void DwarfExpression::emitDwarfProcedureBody(const DIExpression *Expr) {
+  // Check whether the body contains any call_procedure ops. If so,
+  // we need the impl with in-flight tracking for cycle detection.
+  bool HasCalls = false;
+  for (auto &Op : Expr->expr_ops()) {
+    if (Op.getOp() == dwarf::DW_OP_LLVM_call_procedure) {
+      HasCalls = true;
+      break;
+    }
+  }
+
+  if (HasCalls) {
+    SmallPtrSet<const DIDwarfProcedure *, 4> InFlight;
+    emitDwarfProcedureBodyImpl(Expr, InFlight);
+  } else {
+    // Fast path: no calls, emit standard ops directly.
+    for (auto &Op : Expr->expr_ops()) {
+      uint64_t OpCode = Op.getOp();
+      assert(OpCode < dwarf::DW_OP_LLVM_fragment &&
+             "LLVM-internal op in procedure body");
+      emitOp(OpCode);
+
+      // Handle breg0-breg31: one SLEB128 argument.
+      if (OpCode >= dwarf::DW_OP_breg0 && OpCode <= dwarf::DW_OP_breg31) {
+        emitSigned(Op.getArg(0));
+        continue;
+      }
+
+      switch (OpCode) {
+      default:
+        break;
+      case dwarf::DW_OP_constu:
+      case dwarf::DW_OP_plus_uconst:
+      case dwarf::DW_OP_regx:
+        emitUnsigned(Op.getArg(0));
+        break;
+      case dwarf::DW_OP_consts:
+        emitSigned(Op.getArg(0));
+        break;
+      case dwarf::DW_OP_deref_size:
+        emitData1(Op.getArg(0));
+        break;
+      case dwarf::DW_OP_bregx:
+        emitUnsigned(Op.getArg(0));
+        emitSigned(Op.getArg(1));
+        break;
+      }
+    }
+  }
+}
+
+void DwarfExpression::emitDwarfProcedureBodyImpl(
+    const DIExpression *Expr,
+    SmallPtrSetImpl<const DIDwarfProcedure *> &InFlight) {
   for (auto &Op : Expr->expr_ops()) {
     uint64_t OpCode = Op.getOp();
+
+    // Handle call_procedure before emitOp — this is an LLVM-internal op
+    // that must not be emitted as a raw opcode byte.
+    if (OpCode == dwarf::DW_OP_LLVM_call_procedure) {
+      uint64_t ProcIdx = Op.getArg(0);
+      auto DPs = CU.getCUNode()->getDwarfProcedures();
+      assert(DPs && ProcIdx < DPs->getNumOperands() &&
+             "call_procedure index out of range");
+      auto *DP = cast<DIDwarfProcedure>(DPs->getOperand(ProcIdx));
+
+      if (!CU.getDwarfDebug().useDwarfProcedures() || DwarfVersion < 3) {
+        // Inline fallback — recurse with cycle guard.
+        assert(!InFlight.contains(DP) &&
+               "cycle in procedure call graph (should be caught by verifier)");
+        InFlight.insert(DP);
+        if (DIExpression *Body = DP->getExpression())
+          emitDwarfProcedureBodyImpl(Body, InFlight);
+        InFlight.erase(DP);
+      } else {
+        // DW_OP_call4 path — create callee DIE on demand.
+        DIE *ProcDie = CU.getOrCreateDwarfProcedureDIE(DP);
+        assert(ProcDie && "procedure DIE should exist at DwarfVersion >= 3");
+        unsigned RefIdx = CU.getExprRefedDIEIndex(ProcDie);
+        emitOp(dwarf::DW_OP_call4);
+        emitProcedureRef(RefIdx);
+      }
+      continue;
+    }
+
     assert(OpCode < dwarf::DW_OP_LLVM_fragment &&
            "LLVM-internal op in procedure body");
     emitOp(OpCode);
