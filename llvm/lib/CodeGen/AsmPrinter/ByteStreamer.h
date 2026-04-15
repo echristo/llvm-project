@@ -34,6 +34,11 @@ class ByteStreamer {
   virtual void emitULEB128(uint64_t DWord, const Twine &Comment = "",
                            unsigned PadTo = 0) = 0;
   virtual unsigned emitDIERef(const DIE &D) = 0;
+
+  /// Emit a 4-byte fixed-size DIE reference (for DW_OP_call4).
+  /// Unlike emitDIERef which uses ULEB128, DW_OP_call4 requires a fixed
+  /// 4-byte unsigned CU-relative offset per the DWARF spec.
+  virtual unsigned emitDIERefFixed4(const DIE &D) = 0;
 };
 
 class APByteStreamer final : public ByteStreamer {
@@ -64,6 +69,15 @@ public:
     // comments aligned with debug loc entries.
     return ULEB128PadSize;
   }
+  unsigned emitDIERefFixed4(const DIE &D) override {
+    // DW_OP_call4 operand is a 4-byte unsigned CU-relative offset in the
+    // target's byte order. Use emitIntValue which respects target endianness.
+    uint64_t Offset = D.getOffset();
+    assert(Offset <= UINT32_MAX && "DW_OP_call4 offset exceeds 4 bytes");
+    AP.OutStreamer->AddComment(Twine("call4 offset ") + Twine(Offset));
+    AP.emitInt32(Offset);
+    return 4;
+  }
 };
 
 class HashingByteStreamer final : public ByteStreamer {
@@ -84,6 +98,11 @@ class HashingByteStreamer final : public ByteStreamer {
   unsigned emitDIERef(const DIE &D) override {
     Hash.hashRawTypeReference(D);
     return 0; // Only used together with the APByteStreamer.
+  }
+  unsigned emitDIERefFixed4(const DIE &D) override {
+    // For hashing, hash the DIE by content — offset not available pre-layout.
+    Hash.hashRawTypeReference(D);
+    return 0;
   }
 };
 
@@ -137,6 +156,19 @@ public:
     assert(Offset < (1ULL << (ULEB128PadSize * 7)) && "Offset wont fit");
     emitULEB128(Offset, "", ULEB128PadSize);
     return 0; // Only used together with the APByteStreamer.
+  }
+  unsigned emitDIERefFixed4(const DIE &D) override {
+    // BufferByteStreamer is used during expression building (emitDIERef path),
+    // not during emitDebugLocEntry resolution. DW_OP_call4 placeholders are
+    // written by emitDIERef (4-byte index), not emitDIERefFixed4 (resolved
+    // offset). This should not be called on BufferByteStreamer, but implement
+    // it defensively rather than crashing.
+    uint64_t Offset = D.getOffset();
+    uint8_t Buf[4];
+    std::memcpy(Buf, &Offset, 4);
+    for (uint8_t B : Buf)
+      emitInt8(B, "");
+    return 0;
   }
 };
 

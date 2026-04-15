@@ -48,6 +48,7 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Endian.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/MD5.h"
 #include "llvm/Support/raw_ostream.h"
@@ -205,14 +206,19 @@ void DebugLocDwarfExpression::emitBaseTypeRef(uint64_t Idx) {
   getActiveStreamer().emitULEB128(Idx, Twine(Idx), ULEB128PadSize);
 }
 
-void DebugLocDwarfExpression::emitProcedureRef(unsigned Idx) {
-  // Emit index as 4 native bytes. This is an in-process placeholder parsed
-  // by DWARFExpression as Size4 and resolved to the actual CU-relative DIE
-  // offset in DwarfDebug::emitDebugLocEntry.
+void DebugLocDwarfExpression::emitDIERef(unsigned Idx) {
+  // Emit index as 4 bytes in target byte order. This is an in-process
+  // placeholder parsed by DWARFDataExtractor (which uses target endianness)
+  // and resolved to the actual CU-relative DIE offset in
+  // DwarfDebug::emitDebugLocEntry.
   uint8_t Buf[4];
-  std::memcpy(Buf, &Idx, 4);
+  auto Endian = CU.getAsmPrinter()->getDataLayout().isLittleEndian()
+                    ? llvm::endianness::little
+                    : llvm::endianness::big;
+  support::endian::write32(Buf, Idx, Endian);
+  auto &S = getActiveStreamer();
   for (uint8_t B : Buf)
-    getActiveStreamer().emitInt8(B, "");
+    S.emitInt8(B, "");
 }
 
 bool DebugLocDwarfExpression::isFrameRegister(const TargetRegisterInfo &TRI,
@@ -1579,6 +1585,13 @@ void DwarfDebug::endModule() {
 
   // Finalize the debug info for the module.
   finalizeModuleInfo();
+
+  // Seal ExprRefedDIEs on all CUs before location list emission.
+  // After this point, no new procedure DIE registrations are allowed.
+  // IR-defined procedures registered in beginModule via
+  // getOrCreateDwarfProcedureDIE.
+  for (auto &[_, CU] : CUMap)
+    CU->sealExprRefs();
 
   if (useSplitDwarf())
     // Emit debug_loc.dwo/debug_loclists.dwo section.
@@ -3227,6 +3240,28 @@ void DwarfDebug::emitDebugLocEntry(ByteStreamer &Streamer,
     assert(Op.getCode() != dwarf::DW_OP_const_type &&
            "3 operand ops not yet supported");
     assert(!Op.getSubCode() && "SubOps not yet supported");
+
+    // Resolve DW_OP_call4 procedure references. The operand is a placeholder
+    // index into ExprRefedDIEs, written by emitDIERef during expression
+    // emission. Replace with the actual CU-relative DIE offset.
+    //
+    // emitDIERefFixed4 handles the dual-context dispatch:
+    // - APByteStreamer: emits 4-byte LE CU-relative offset (post-layout)
+    // - HashingByteStreamer: hashes the DIE by content (pre-layout, no offset)
+    if (Op.getCode() == dwarf::DW_OP_call4) {
+      Streamer.emitInt8(dwarf::DW_OP_call4, "DW_OP_call4");
+      unsigned Idx = Op.getRawOperand(0);
+      assert(Idx < CU->ExprRefedDIEs.size() &&
+             "DW_OP_call4 placeholder index out of range");
+      unsigned Length = Streamer.emitDIERefFixed4(*CU->ExprRefedDIEs[Idx]);
+      // Advance comment pointers past the operand bytes.
+      for (unsigned J = 0; J < (Length ? Length : 4u); ++J)
+        if (Comment != End)
+          Comment++;
+      Offset = Op.getEndOffset();
+      continue;
+    }
+
     Streamer.emitInt8(Op.getCode(), Comment != End ? *(Comment++) : "");
     Offset++;
     for (unsigned I = 0; I < Op.getDescription().Op.size(); ++I) {

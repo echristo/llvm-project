@@ -139,7 +139,7 @@ protected:
   /// For DIE path: adds a DIEEntry with DW_FORM_ref4.
   /// For loc list path: emits a 4-byte index placeholder into ExprRefedDIEs,
   /// resolved later by DwarfDebug::emitDebugLocEntry.
-  virtual void emitProcedureRef(unsigned Idx) = 0;
+  virtual void emitDIERef(unsigned Idx) = 0;
 
   /// Start emitting data to the temporary buffer. The data stored in the
   /// temporary buffer can be committed to the main output using
@@ -306,17 +306,9 @@ public:
   void emitLegacySExt(unsigned FromBits);
   void emitLegacyZExt(unsigned FromBits);
 
-  /// Emit a DWARF procedure body into the output stream. For bodies
-  /// containing only standard DWARF ops, emits directly. For bodies that
-  /// contain DW_OP_LLVM_call_procedure, delegates to the private impl
-  /// with in-flight cycle tracking.
-  void emitDwarfProcedureBody(const DIExpression *Expr);
-
-private:
-  /// Emit a DWARF procedure body with in-flight tracking for the inline
-  /// fallback path. InFlight tracks procedures currently being inlined to
-  /// prevent cycles. The verifier rejects cycles, but this is defense in
-  /// depth for malformed bitcode that bypasses verification.
+  /// Emit a DWARF procedure body inline (for the DWARF < 3 / flag-off
+  /// fallback path in addExpression). InFlight tracks procedures currently
+  /// being inlined to prevent cycles. Private: only called from addExpression.
   void emitDwarfProcedureBodyImpl(
       const DIExpression *Expr,
       SmallPtrSetImpl<const DIDwarfProcedure *> &InFlight);
@@ -351,7 +343,7 @@ class DebugLocDwarfExpression final : public DwarfExpression {
   void emitUnsigned(uint64_t Value) override;
   void emitData1(uint8_t Value) override;
   void emitBaseTypeRef(uint64_t Idx) override;
-  void emitProcedureRef(unsigned Idx) override;
+  void emitDIERef(unsigned Idx) override;
 
   void enableTemporaryBuffer() override;
   void disableTemporaryBuffer() override;
@@ -382,7 +374,7 @@ class DIEDwarfExpression final : public DwarfExpression {
   void emitUnsigned(uint64_t Value) override;
   void emitData1(uint8_t Value) override;
   void emitBaseTypeRef(uint64_t Idx) override;
-  void emitProcedureRef(unsigned Idx) override;
+  void emitDIERef(unsigned Idx) override;
 
   void enableTemporaryBuffer() override;
   void disableTemporaryBuffer() override;

@@ -233,6 +233,27 @@ public:
   /// Reverse map from DIE pointer to index in ExprRefedDIEs.
   DenseMap<DIE *, unsigned> ExprRefedDIEIndex;
 
+  /// Lifecycle seal: once set, no more ExprRefedDIEs registrations are
+  /// allowed. All IR-defined procedures register in beginModule via
+  /// getOrCreateDwarfProcedureDIE. The seal must be set after ALL
+  /// registration is complete and before ANY loc list emission.
+  bool ExprRefedDIEsSealed = false;
+
+  /// Atomically register a DIE in ExprRefedDIEs/ExprRefedDIEIndex.
+  /// Must be called before sealExprRefs().
+  unsigned registerExprRefedDIE(DIE *D) {
+    assert(!ExprRefedDIEsSealed &&
+           "ExprRefedDIE registered after seal — lifecycle invariant violated");
+    unsigned Idx = ExprRefedDIEs.size();
+    ExprRefedDIEs.push_back(D);
+    ExprRefedDIEIndex[D] = Idx;
+    return Idx;
+  }
+
+  /// Seal the ExprRefedDIEs vector. After this, registerExprRefedDIE
+  /// will assert. Call before location list emission begins.
+  void sealExprRefs() { ExprRefedDIEsSealed = true; }
+
   /// Add a DW_OP_call4 procedure reference into a DIE location expression.
   /// Uses DIEEntry with DW_FORM_ref4 for deferred CU-relative offset
   /// resolution.

@@ -626,8 +626,15 @@ bool DwarfExpression::addExpression(
     case dwarf::DW_OP_LLVM_call_procedure: {
       uint64_t ProcIdx = Op->getArg(0);
       auto DPs = CU.getCUNode()->getDwarfProcedures();
-      assert(DPs && ProcIdx < DPs->getNumOperands() &&
-             "call_procedure index out of range");
+      // ThinLTO can null the dwarfProcedures array when importing functions
+      // across modules. Gracefully drop the variable's location rather than
+      // crashing.
+      if (!DPs || ProcIdx >= DPs->getNumOperands()) {
+        LLVM_DEBUG(dbgs() << "dropping DW_OP_LLVM_call_procedure: "
+                          << "procedure list unavailable (ThinLTO import)\n");
+        LocationKind = Unknown;
+        return false;
+      }
       auto *DP = cast<DIDwarfProcedure>(DPs->getOperand(ProcIdx));
 
       if (!CU.getDwarfDebug().useDwarfProcedures() || DwarfVersion < 3) {
@@ -647,7 +654,7 @@ bool DwarfExpression::addExpression(
       assert(ProcDie && "procedure DIE should exist at DwarfVersion >= 3");
       unsigned RefIdx = CU.getExprRefedDIEIndex(ProcDie);
       emitOp(dwarf::DW_OP_call4);
-      emitProcedureRef(RefIdx);
+      emitDIERef(RefIdx);
       break;
     }
     case dwarf::DW_OP_plus_uconst:
@@ -840,65 +847,22 @@ void DwarfExpression::emitLegacyZExt(unsigned FromBits) {
   emitOp(dwarf::DW_OP_and);
 }
 
-void DwarfExpression::emitDwarfProcedureBody(const DIExpression *Expr) {
-  // Check whether the body contains any call_procedure ops. If so,
-  // we need the impl with in-flight tracking for cycle detection.
-  bool HasCalls = false;
-  for (auto &Op : Expr->expr_ops()) {
-    if (Op.getOp() == dwarf::DW_OP_LLVM_call_procedure) {
-      HasCalls = true;
-      break;
-    }
-  }
-
-  if (HasCalls) {
-    SmallPtrSet<const DIDwarfProcedure *, 4> InFlight;
-    emitDwarfProcedureBodyImpl(Expr, InFlight);
-  } else {
-    // Fast path: no calls, emit standard ops directly.
-    for (auto &Op : Expr->expr_ops()) {
-      uint64_t OpCode = Op.getOp();
-      assert(OpCode < dwarf::DW_OP_LLVM_fragment &&
-             "LLVM-internal op in procedure body");
-      emitOp(OpCode);
-
-      // Handle breg0-breg31: one SLEB128 argument.
-      if (OpCode >= dwarf::DW_OP_breg0 && OpCode <= dwarf::DW_OP_breg31) {
-        emitSigned(Op.getArg(0));
-        continue;
-      }
-
-      switch (OpCode) {
-      default:
-        break;
-      case dwarf::DW_OP_constu:
-      case dwarf::DW_OP_plus_uconst:
-      case dwarf::DW_OP_regx:
-        emitUnsigned(Op.getArg(0));
-        break;
-      case dwarf::DW_OP_consts:
-        emitSigned(Op.getArg(0));
-        break;
-      case dwarf::DW_OP_deref_size:
-        emitData1(Op.getArg(0));
-        break;
-      case dwarf::DW_OP_bregx:
-        emitUnsigned(Op.getArg(0));
-        emitSigned(Op.getArg(1));
-        break;
-      }
-    }
-  }
-}
-
+// emitDwarfProcedureBody deleted — procedure DIE body emission now uses
+// raw-byte encoding in DwarfCompileUnit::getOrCreateDwarfProcedureDIE,
+// bypassing DwarfExpression's LocationKind tracking which is semantically
+// wrong for pure stack computations.
+//
+// emitDwarfProcedureBodyImpl retained for the INLINE FALLBACK path in
+// addExpression (DWARF < 3 or -use-dwarf-procedures=false), where the
+// procedure body ops are emitted directly into the caller's expression.
+// In this context, DwarfExpression's LocationKind tracking IS appropriate
+// because the ops become part of the surrounding expression.
 void DwarfExpression::emitDwarfProcedureBodyImpl(
     const DIExpression *Expr,
     SmallPtrSetImpl<const DIDwarfProcedure *> &InFlight) {
   for (auto &Op : Expr->expr_ops()) {
     uint64_t OpCode = Op.getOp();
 
-    // Handle call_procedure before emitOp — this is an LLVM-internal op
-    // that must not be emitted as a raw opcode byte.
     if (OpCode == dwarf::DW_OP_LLVM_call_procedure) {
       uint64_t ProcIdx = Op.getArg(0);
       auto DPs = CU.getCUNode()->getDwarfProcedures();
@@ -906,22 +870,13 @@ void DwarfExpression::emitDwarfProcedureBodyImpl(
              "call_procedure index out of range");
       auto *DP = cast<DIDwarfProcedure>(DPs->getOperand(ProcIdx));
 
-      if (!CU.getDwarfDebug().useDwarfProcedures() || DwarfVersion < 3) {
-        // Inline fallback — recurse with cycle guard.
-        assert(!InFlight.contains(DP) &&
-               "cycle in procedure call graph (should be caught by verifier)");
-        InFlight.insert(DP);
-        if (DIExpression *Body = DP->getExpression())
-          emitDwarfProcedureBodyImpl(Body, InFlight);
-        InFlight.erase(DP);
-      } else {
-        // DW_OP_call4 path — create callee DIE on demand.
-        DIE *ProcDie = CU.getOrCreateDwarfProcedureDIE(DP);
-        assert(ProcDie && "procedure DIE should exist at DwarfVersion >= 3");
-        unsigned RefIdx = CU.getExprRefedDIEIndex(ProcDie);
-        emitOp(dwarf::DW_OP_call4);
-        emitProcedureRef(RefIdx);
-      }
+      // Inline fallback — recurse with cycle guard.
+      if (InFlight.contains(DP))
+        report_fatal_error("cycle in DWARF procedure call graph");
+      InFlight.insert(DP);
+      if (DIExpression *Body = DP->getExpression())
+        emitDwarfProcedureBodyImpl(Body, InFlight);
+      InFlight.erase(DP);
       continue;
     }
 
@@ -929,30 +884,80 @@ void DwarfExpression::emitDwarfProcedureBodyImpl(
            "LLVM-internal op in procedure body");
     emitOp(OpCode);
 
-    // Handle breg0-breg31: one SLEB128 argument.
     if (OpCode >= dwarf::DW_OP_breg0 && OpCode <= dwarf::DW_OP_breg31) {
       emitSigned(Op.getArg(0));
       continue;
     }
 
+    // Handle lit0-lit31 and reg0-reg31: no operands needed.
+    if ((OpCode >= dwarf::DW_OP_lit0 && OpCode <= dwarf::DW_OP_lit31) ||
+        (OpCode >= dwarf::DW_OP_reg0 && OpCode <= dwarf::DW_OP_reg31))
+      continue;
+
     switch (OpCode) {
-    default:
+    // Zero-argument ops: opcode already emitted above.
+    case dwarf::DW_OP_deref:
+    case dwarf::DW_OP_dup:
+    case dwarf::DW_OP_drop:
+    case dwarf::DW_OP_over:
+    case dwarf::DW_OP_swap:
+    case dwarf::DW_OP_rot:
+    case dwarf::DW_OP_abs:
+    case dwarf::DW_OP_and:
+    case dwarf::DW_OP_div:
+    case dwarf::DW_OP_minus:
+    case dwarf::DW_OP_mod:
+    case dwarf::DW_OP_mul:
+    case dwarf::DW_OP_neg:
+    case dwarf::DW_OP_not:
+    case dwarf::DW_OP_or:
+    case dwarf::DW_OP_plus:
+    case dwarf::DW_OP_shl:
+    case dwarf::DW_OP_shr:
+    case dwarf::DW_OP_shra:
+    case dwarf::DW_OP_xor:
+    case dwarf::DW_OP_eq:
+    case dwarf::DW_OP_ge:
+    case dwarf::DW_OP_gt:
+    case dwarf::DW_OP_le:
+    case dwarf::DW_OP_lt:
+    case dwarf::DW_OP_ne:
+    case dwarf::DW_OP_nop:
+    case dwarf::DW_OP_stack_value:
       break;
+    // One ULEB128 argument.
     case dwarf::DW_OP_constu:
     case dwarf::DW_OP_plus_uconst:
     case dwarf::DW_OP_regx:
+    case dwarf::DW_OP_addrx:
+    case dwarf::DW_OP_constx:
+    case dwarf::DW_OP_piece:
       emitUnsigned(Op.getArg(0));
       break;
+    // One SLEB128 argument.
     case dwarf::DW_OP_consts:
+    case dwarf::DW_OP_fbreg:
       emitSigned(Op.getArg(0));
       break;
+    // One 1-byte argument.
     case dwarf::DW_OP_deref_size:
+    case dwarf::DW_OP_pick:
+    case dwarf::DW_OP_xderef_size:
       emitData1(Op.getArg(0));
       break;
+    // One ULEB128 + one SLEB128 argument.
     case dwarf::DW_OP_bregx:
       emitUnsigned(Op.getArg(0));
       emitSigned(Op.getArg(1));
       break;
+    // Two ULEB128 arguments.
+    case dwarf::DW_OP_bit_piece:
+      emitUnsigned(Op.getArg(0));
+      emitUnsigned(Op.getArg(1));
+      break;
+    default:
+      llvm_unreachable("unhandled op in procedure body inline fallback — "
+                       "update this switch to match getOrCreateDwarfProcedureDIE");
     }
   }
 }

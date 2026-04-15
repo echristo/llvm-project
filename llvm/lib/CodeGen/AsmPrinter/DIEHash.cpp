@@ -229,6 +229,13 @@ void DIEHash::hashBlockData(const DIE::const_value_range &Values) {
       assert(!Name.empty() &&
              "Base types referenced from DW_OP_convert should have a name");
       hashNestedType(C, Name);
+    } else if (V.getType() == DIEValue::isEntry) {
+      // DW_OP_call4 references to DW_TAG_dwarf_procedure DIEs inside
+      // location expressions. Hash the referenced DIE by content.
+      assert(V.getDIEEntry().getEntry().getTag() ==
+                 dwarf::DW_TAG_dwarf_procedure &&
+             "unexpected DIEEntry in block data");
+      hashRawTypeReference(V.getDIEEntry().getEntry());
     } else
       Hash.update(V.getDIEInteger().getValue());
 }

@@ -1908,23 +1908,167 @@ DIE *DwarfCompileUnit::getOrCreateDwarfProcedureDIE(
   // call_procedure ops in the body can reference this procedure's DIE
   // via getExprRefedDIEIndex(). The DIE cache (getDIE(DP) above) prevents
   // infinite recursion for the DW_OP_call4 path.
-  unsigned Idx = ExprRefedDIEs.size();
-  ExprRefedDIEs.push_back(&Die);
-  ExprRefedDIEIndex[&Die] = Idx;
+  registerExprRefedDIE(&Die);
 
   if (!DP->getName().empty())
     addString(Die, dwarf::DW_AT_name, DP->getName());
 
-  if (DIExpression *Expr = DP->getExpression()) {
-    // Emit the expression body via DIEDwarfExpression. We use
-    // emitDwarfProcedureBody rather than addExpression because
-    // addExpression applies location-kind semantics (e.g., consuming a
-    // trailing DW_OP_deref as a memory dereference) that are
-    // inappropriate for procedure bodies, which are pure stack
-    // computations.
+  if (const DIExpression *Expr = DP->getExpression()) {
+    // Emit the expression body as raw DWARF bytes directly into a DIELoc.
+    // We bypass DwarfExpression entirely because its LocationKind tracking
+    // (Register/Memory/Implicit) is semantically wrong for procedure bodies,
+    // which are pure stack computations per DWARF Section 2.5.1.5.
+    //
+    // This switch must cover every op accepted by the verifier in
+    // visitDIDwarfProcedure() (all standard DWARF ops + LLVM_call_procedure
+    // + LLVM_convert; rejects: LLVM_fragment, LLVM_arg, LLVM_entry_value).
+    // When adding a new legal op to the verifier, update this switch.
     auto *Loc = new (DIEValueAllocator) DIELoc;
-    DIEDwarfExpression DwarfExpr(*Asm, *this, *Loc);
-    DwarfExpr.emitDwarfProcedureBody(Expr);
+
+    // Hoist procedure list lookup out of per-op loop (perf: P15).
+    auto CUDPs = getCUNode()->getDwarfProcedures();
+
+    for (auto &Op : Expr->expr_ops()) {
+      uint64_t OpCode = Op.getOp();
+
+      // Handle DW_OP_LLVM_call_procedure: emit DW_OP_call4 referencing
+      // the callee procedure's DIE. Pre-registration (above) ensures the
+      // callee DIE exists; getDIE cache prevents infinite recursion
+      // (including mutual recursion: A calls B, B calls A — getDIE returns
+      // the in-progress DIE for A, skipping duplicate registration).
+      //
+      // Two-path encoding note: this DIE-body path uses addProcedureRef
+      // (DIEEntry with DW_FORM_ref4) — the assembler resolves the
+      // CU-relative offset during section emission. The loc-list path
+      // (DebugLocDwarfExpression::emitDIERef) writes a 4-byte placeholder
+      // index into ExprRefedDIEs, resolved by emitDIERefFixed4 in
+      // emitDebugLocEntry. Both produce spec-compliant DW_OP_call4 with
+      // a 4-byte CU-relative offset, but via different mechanisms because
+      // DIE attributes use deferred resolution while loc-list bytes use
+      // explicit resolution.
+      if (OpCode == dwarf::DW_OP_LLVM_call_procedure) {
+        uint64_t ProcIdx = Op.getArg(0);
+        assert(CUDPs && ProcIdx < CUDPs->getNumOperands() &&
+               "call_procedure index out of range");
+        auto *CalleeDP =
+            cast<DIDwarfProcedure>(CUDPs->getOperand(ProcIdx));
+        DIE *CalleeDie = getOrCreateDwarfProcedureDIE(CalleeDP);
+        assert(CalleeDie &&
+               "callee procedure DIE should exist at DwarfVersion >= 3");
+        addUInt(*Loc, dwarf::DW_FORM_data1, dwarf::DW_OP_call4);
+        addProcedureRef(*Loc, *CalleeDie);
+        continue;
+      }
+
+      // DW_OP_LLVM_convert in procedure bodies requires base type DIE
+      // references via ExprRefedBaseTypes. This is handled by the emitter-
+      // side discovery path (feature/dwarf-procedure-emission) which has
+      // buildExpressionBody. For IR-defined procedures, convert ops should
+      // be lowered before reaching the procedure body. If this fires,
+      // the frontend emitted a convert op in a DIDwarfProcedure.
+      if (OpCode == dwarf::DW_OP_LLVM_convert)
+        report_fatal_error("DW_OP_LLVM_convert in procedure body not yet "
+                           "supported in raw-byte emitter — lower before "
+                           "creating DIDwarfProcedure");
+
+      // Emit the opcode byte.
+      addUInt(*Loc, dwarf::DW_FORM_data1, OpCode);
+
+      // Handle breg0-breg31: one SLEB128 argument.
+      if (OpCode >= dwarf::DW_OP_breg0 && OpCode <= dwarf::DW_OP_breg31) {
+        addSInt(*Loc, dwarf::DW_FORM_sdata, Op.getArg(0));
+        continue;
+      }
+
+      // Handle lit0-lit31: no arguments.
+      if (OpCode >= dwarf::DW_OP_lit0 && OpCode <= dwarf::DW_OP_lit31)
+        continue;
+
+      // Handle reg0-reg31: no arguments.
+      if (OpCode >= dwarf::DW_OP_reg0 && OpCode <= dwarf::DW_OP_reg31)
+        continue;
+
+      switch (OpCode) {
+      // Zero-argument ops.
+      case dwarf::DW_OP_deref:
+      case dwarf::DW_OP_dup:
+      case dwarf::DW_OP_drop:
+      case dwarf::DW_OP_over:
+      case dwarf::DW_OP_swap:
+      case dwarf::DW_OP_rot:
+      case dwarf::DW_OP_abs:
+      case dwarf::DW_OP_and:
+      case dwarf::DW_OP_div:
+      case dwarf::DW_OP_minus:
+      case dwarf::DW_OP_mod:
+      case dwarf::DW_OP_mul:
+      case dwarf::DW_OP_neg:
+      case dwarf::DW_OP_not:
+      case dwarf::DW_OP_or:
+      case dwarf::DW_OP_plus:
+      case dwarf::DW_OP_shl:
+      case dwarf::DW_OP_shr:
+      case dwarf::DW_OP_shra:
+      case dwarf::DW_OP_xor:
+      case dwarf::DW_OP_eq:
+      case dwarf::DW_OP_ge:
+      case dwarf::DW_OP_gt:
+      case dwarf::DW_OP_le:
+      case dwarf::DW_OP_lt:
+      case dwarf::DW_OP_ne:
+      case dwarf::DW_OP_nop:
+      case dwarf::DW_OP_stack_value:
+        break;
+
+      // One ULEB128 argument.
+      case dwarf::DW_OP_constu:
+      case dwarf::DW_OP_plus_uconst:
+      case dwarf::DW_OP_regx:
+      case dwarf::DW_OP_addrx:
+      case dwarf::DW_OP_constx:
+        addUInt(*Loc, dwarf::DW_FORM_udata, Op.getArg(0));
+        break;
+
+      // One SLEB128 argument.
+      case dwarf::DW_OP_consts:
+      case dwarf::DW_OP_fbreg:
+        addSInt(*Loc, dwarf::DW_FORM_sdata, Op.getArg(0));
+        break;
+
+      // One 1-byte argument.
+      case dwarf::DW_OP_deref_size:
+      case dwarf::DW_OP_pick:
+      case dwarf::DW_OP_xderef_size:
+        addUInt(*Loc, dwarf::DW_FORM_data1, Op.getArg(0));
+        break;
+
+      // One ULEB128 + one SLEB128 argument.
+      case dwarf::DW_OP_bregx:
+        addUInt(*Loc, dwarf::DW_FORM_udata, Op.getArg(0));
+        addSInt(*Loc, dwarf::DW_FORM_sdata, Op.getArg(1));
+        break;
+
+      // One ULEB128 argument (byte count).
+      case dwarf::DW_OP_piece:
+        addUInt(*Loc, dwarf::DW_FORM_udata, Op.getArg(0));
+        break;
+      case dwarf::DW_OP_bit_piece:
+        addUInt(*Loc, dwarf::DW_FORM_udata, Op.getArg(0));
+        addUInt(*Loc, dwarf::DW_FORM_udata, Op.getArg(1));
+        break;
+
+      // One 8-byte argument (address).
+      case dwarf::DW_OP_addr:
+        addUInt(*Loc, dwarf::DW_FORM_addr, Op.getArg(0));
+        break;
+
+      default:
+        llvm_unreachable("unhandled op in DWARF procedure body — update this "
+                         "switch when adding new ops to the verifier's "
+                         "visitDIDwarfProcedure legal set");
+      }
+    }
+
     addBlock(Die, dwarf::DW_AT_location, Loc);
   }
 
