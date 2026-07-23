@@ -36,7 +36,8 @@ public:
   /// Translates the given LLVM debug location to an MLIR location.
   Location translateLoc(llvm::DILocation *loc);
 
-  /// Translates the LLVM DWARF expression metadata to MLIR.
+  /// Translates the LLVM DWARF expression metadata to MLIR. Returns null if
+  /// the expression is unsupported.
   DIExpressionAttr translateExpression(llvm::DIExpression *node);
 
   /// Translates the LLVM DWARF global variable expression metadata to MLIR.

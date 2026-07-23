@@ -419,8 +419,10 @@ produce a valid debug record.
 A `DIExpression` is interpreted in the same way regardless of which kind
 of debug record it's attached to.
 
-`DIExpression`s are always printed and parsed inline; they can never be
-referenced by an ID (e.g. `!1`).
+The assembly writer prints metadata-free `DIExpression`s inline. The
+representation also supports numbered definitions for expressions with
+metadata operands, but no supported operation currently consumes those
+operands, so such expressions are not yet valid in verified IR.
 ```
 (dwarf-opcodes)=
 

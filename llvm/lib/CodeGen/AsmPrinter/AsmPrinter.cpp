@@ -87,6 +87,7 @@
 #include "llvm/IR/Mangler.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ModuleSlotTracker.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/PseudoProbe.h"
 #include "llvm/IR/Type.h"
@@ -1257,7 +1258,9 @@ static void emitFakeUse(const MachineInstr *MI, AsmPrinter &AP) {
 /// emitDebugValueComment - This method handles the target-independent form
 /// of DBG_VALUE, returning true if it was able to do so.  A false return
 /// means the target will need to handle MI in EmitInstruction.
-static bool emitDebugValueComment(const MachineInstr *MI, AsmPrinter &AP) {
+static bool
+emitDebugValueComment(const MachineInstr *MI, AsmPrinter &AP,
+                      std::optional<ModuleSlotTracker> &MetadataSlots) {
   // This code handles only the 4-operand target-independent form.
   if (MI->isNonListDebugValue() && MI->getNumOperands() != 4)
     return false;
@@ -1284,10 +1287,21 @@ static bool emitDebugValueComment(const MachineInstr *MI, AsmPrinter &AP) {
   if (Expr->getNumElements()) {
     OS << '[';
     ListSeparator LS;
-    for (auto &Op : Expr->expr_ops()) {
-      OS << LS << dwarf::OperationEncodingString(Op.getOp());
-      for (unsigned I = 0; I < Op.getNumArgs(); ++I)
-        OS << ' ' << Op.getArg(I);
+    const Module *M = MI->getMF()->getFunction().getParent();
+    if (Expr->getNumOperands() && !MetadataSlots)
+      MetadataSlots.emplace(M, /*ShouldInitializeAllMetadata=*/true);
+    DIExpressionCursor Cursor(Expr);
+    while (std::optional<DIExpressionCursor::Operation> Op = Cursor.take()) {
+      OS << LS << dwarf::OperationEncodingString(Op->getOp());
+      for (unsigned I = 0; I < Op->getNumArgs(); ++I)
+        OS << ' ' << Op->getArg(I);
+      for (const MDOperand &Operand : Op->getMetadataOperands()) {
+        OS << ' ';
+        if (Metadata *MD = Operand.get())
+          MD->printAsOperand(OS, *MetadataSlots, M);
+        else
+          OS << "null";
+      }
     }
     OS << "] ";
   }
@@ -2075,6 +2089,9 @@ void AsmPrinter::emitFunctionBody() {
   bool HasAnyRealCode = false;
   int NumInstsInFunction = 0;
   bool IsEHa = MMI->getModule()->getModuleFlag("eh-asynch");
+  // Keep one tracker per function to avoid rescanning module metadata for each
+  // debug comment while retaining stable slot numbers.
+  std::optional<ModuleSlotTracker> MetadataSlots;
 
   const MCSubtargetInfo *STI = nullptr;
   if (this->MF)
@@ -2179,7 +2196,7 @@ void AsmPrinter::emitFunctionBody() {
       case TargetOpcode::DBG_VALUE:
       case TargetOpcode::DBG_VALUE_LIST:
         if (isVerbose()) {
-          if (!emitDebugValueComment(&MI, *this))
+          if (!emitDebugValueComment(&MI, *this, MetadataSlots))
             emitInstruction(&MI);
         }
         break;

@@ -3013,6 +3013,225 @@ TEST_F(DICompileUnitTest, replaceArrays) {
   EXPECT_EQ(nullptr, N->getMacros().get());
 }
 
+typedef MetadataTest DIExpressionRawOperandsTest;
+
+TEST_F(DIExpressionRawOperandsTest, StorageIdentityAndValidity) {
+  uint64_t Elements[] = {dwarf::DW_OP_lit0, dwarf::DW_OP_plus};
+  Metadata *First = getConstantAsMetadata();
+  Metadata *Second = getConstantAsMetadata();
+
+  auto *Empty = DIExpression::get(Context, Elements);
+  EXPECT_EQ(0u, Empty->getNumOperands());
+  EXPECT_EQ(Empty, DIExpression::get(Context, Elements));
+  EXPECT_TRUE(Empty->isValid());
+
+  Metadata *Repeated[] = {First, Second, First};
+  auto *Expression = DIExpression::get(Context, Elements, Repeated);
+  EXPECT_EQ(Expression, DIExpression::get(Context, Elements, Repeated));
+  EXPECT_NE(Expression,
+            DIExpression::get(Context, Elements, ArrayRef<Metadata *>{First}));
+  EXPECT_NE(Expression,
+            DIExpression::get(Context, Elements,
+                              ArrayRef<Metadata *>{Second, First, First}));
+  ASSERT_EQ(3u, Expression->getNumOperands());
+  EXPECT_EQ(First, Expression->getOperand(0));
+  EXPECT_EQ(Second, Expression->getOperand(1));
+  EXPECT_EQ(First, Expression->getOperand(2));
+  EXPECT_FALSE(Expression->isValid());
+
+  auto *Malformed = DIExpression::get(Context, {dwarf::DW_OP_plus_uconst});
+  EXPECT_FALSE(Malformed->isValid());
+}
+
+TEST_F(DIExpressionRawOperandsTest, ClonePreservesEveryStorageKind) {
+  uint64_t Elements[] = {dwarf::DW_OP_deref};
+  Metadata *First = getConstantAsMetadata();
+  Metadata *Second = getConstantAsMetadata();
+  Metadata *RawOperands[] = {First, Second, First};
+  auto *Uniqued = DIExpression::get(Context, Elements, RawOperands);
+  auto *Distinct = DIExpression::getDistinct(Context, Elements, RawOperands);
+  auto Temporary = DIExpression::getTemporary(Context, Elements, RawOperands);
+
+  EXPECT_TRUE(Distinct->isDistinct());
+  EXPECT_TRUE(Temporary->isTemporary());
+
+  for (DIExpression *Source : {Uniqued, Distinct, Temporary.get()}) {
+    ASSERT_EQ(3u, Source->getNumOperands());
+    EXPECT_EQ(First, Source->getOperand(0));
+    EXPECT_EQ(Second, Source->getOperand(1));
+    EXPECT_EQ(First, Source->getOperand(2));
+    EXPECT_FALSE(Source->isValid());
+
+    TempDIExpression Clone = Source->clone();
+    EXPECT_TRUE(Clone->isTemporary());
+    EXPECT_EQ(Source->getElements(), Clone->getElements());
+    ASSERT_EQ(3u, Clone->getNumOperands());
+    EXPECT_EQ(First, Clone->getOperand(0));
+    EXPECT_EQ(Second, Clone->getOperand(1));
+    EXPECT_EQ(First, Clone->getOperand(2));
+    EXPECT_FALSE(Clone->isValid());
+  }
+}
+
+TEST_F(DIExpressionRawOperandsTest, TargetRAUWReuniquesWithoutCollision) {
+  auto *First =
+      new GlobalVariable(M, Type::getInt32Ty(Context), false,
+                         GlobalValue::ExternalLinkage, nullptr, "first");
+  auto *Second =
+      new GlobalVariable(M, Type::getInt32Ty(Context), false,
+                         GlobalValue::ExternalLinkage, nullptr, "second");
+  Metadata *FirstMetadata = ValueAsMetadata::get(First);
+  Metadata *SecondMetadata = ValueAsMetadata::get(Second);
+  auto *Expression = DIExpression::get(Context, {dwarf::DW_OP_lit0},
+                                       ArrayRef<Metadata *>{FirstMetadata});
+
+  First->replaceAllUsesWith(Second);
+
+  EXPECT_TRUE(Expression->isUniqued());
+  EXPECT_TRUE(Expression->isResolved());
+  EXPECT_FALSE(Expression->isValid());
+  EXPECT_EQ(SecondMetadata, Expression->getOperand(0));
+  EXPECT_EQ(Expression,
+            DIExpression::get(Context, {dwarf::DW_OP_lit0},
+                              ArrayRef<Metadata *>{SecondMetadata}));
+  TempDIExpression Clone = Expression->clone();
+  ASSERT_EQ(1u, Clone->getNumOperands());
+  EXPECT_EQ(SecondMetadata, Clone->getOperand(0));
+}
+
+TEST_F(DIExpressionRawOperandsTest, TargetRAUWCollisionBecomesDistinct) {
+  auto *First =
+      new GlobalVariable(M, Type::getInt32Ty(Context), false,
+                         GlobalValue::ExternalLinkage, nullptr, "first");
+  auto *Second =
+      new GlobalVariable(M, Type::getInt32Ty(Context), false,
+                         GlobalValue::ExternalLinkage, nullptr, "second");
+  Metadata *FirstMetadata = ValueAsMetadata::get(First);
+  Metadata *SecondMetadata = ValueAsMetadata::get(Second);
+  auto *Mutated = DIExpression::get(Context, {dwarf::DW_OP_lit0},
+                                    ArrayRef<Metadata *>{FirstMetadata});
+  auto *Canonical = DIExpression::get(Context, {dwarf::DW_OP_lit0},
+                                      ArrayRef<Metadata *>{SecondMetadata});
+
+  First->replaceAllUsesWith(Second);
+
+  EXPECT_TRUE(Mutated->isDistinct());
+  EXPECT_FALSE(Mutated->isValid());
+  EXPECT_EQ(SecondMetadata, Mutated->getOperand(0));
+  EXPECT_EQ(Canonical, DIExpression::get(Context, {dwarf::DW_OP_lit0},
+                                         ArrayRef<Metadata *>{SecondMetadata}));
+}
+
+TEST_F(DIExpressionRawOperandsTest,
+       TemporaryTargetResolutionReuniquesWithoutCollision) {
+  auto TemporaryTarget = MDTuple::getTemporary(Context, {});
+  Metadata *FinalTarget = MDTuple::get(Context, {getConstantAsMetadata()});
+  auto *Expression =
+      DIExpression::get(Context, {dwarf::DW_OP_lit0},
+                        ArrayRef<Metadata *>{TemporaryTarget.get()});
+  EXPECT_FALSE(Expression->isResolved());
+  EXPECT_FALSE(Expression->isValid());
+
+  TemporaryTarget->replaceAllUsesWith(FinalTarget);
+
+  EXPECT_TRUE(Expression->isUniqued());
+  EXPECT_TRUE(Expression->isResolved());
+  EXPECT_FALSE(Expression->isValid());
+  EXPECT_EQ(FinalTarget, Expression->getOperand(0));
+  EXPECT_EQ(Expression, DIExpression::get(Context, {dwarf::DW_OP_lit0},
+                                          ArrayRef<Metadata *>{FinalTarget}));
+}
+
+TEST_F(DIExpressionRawOperandsTest,
+       TemporaryTargetResolutionCollisionReplacesExpression) {
+  auto TemporaryTarget = MDTuple::getTemporary(Context, {});
+  Metadata *FinalTarget = MDTuple::get(Context, {getConstantAsMetadata()});
+  auto *Canonical = DIExpression::get(Context, {dwarf::DW_OP_lit0},
+                                      ArrayRef<Metadata *>{FinalTarget});
+  auto *Unresolved =
+      DIExpression::get(Context, {dwarf::DW_OP_lit0},
+                        ArrayRef<Metadata *>{TemporaryTarget.get()});
+  TrackingMDRef Tracked(Unresolved);
+
+  TemporaryTarget->replaceAllUsesWith(FinalTarget);
+
+  EXPECT_EQ(Canonical, Tracked.get());
+  EXPECT_FALSE(cast<DIExpression>(Tracked.get())->isValid());
+}
+
+TEST_F(DIExpressionRawOperandsTest, CursorPreservesMetadataFreeOperations) {
+  auto *Expression =
+      DIExpression::get(Context, {dwarf::DW_OP_lit0, dwarf::DW_OP_dup});
+  ASSERT_TRUE(Expression->isValid());
+
+  DIExpressionCursor Cursor(Expression);
+  auto First = Cursor.take();
+  ASSERT_TRUE(First);
+  EXPECT_EQ(dwarf::DW_OP_lit0, First->getOp());
+  EXPECT_TRUE(First->getMetadataOperands().empty());
+
+  auto Second = Cursor.take();
+  ASSERT_TRUE(Second);
+  EXPECT_EQ(dwarf::DW_OP_dup, Second->getOp());
+  EXPECT_TRUE(Second->getMetadataOperands().empty());
+  EXPECT_FALSE(Cursor);
+}
+
+TEST_F(DIExpressionRawOperandsTest, EqualityIncludesOrderedRawOperands) {
+  // DW_OP_lit0 does not use metadata. Equality must still distinguish raw
+  // nodes created through the C++ API.
+  Metadata *First = getConstantAsMetadata();
+  Metadata *Second = getConstantAsMetadata();
+  uint64_t Elements[] = {dwarf::DW_OP_lit0};
+
+  Metadata *Repeated[] = {First, nullptr, First};
+  auto *LHS = DIExpression::getDistinct(Context, Elements, Repeated);
+  auto *Same = DIExpression::getDistinct(Context, Elements, Repeated);
+  EXPECT_TRUE(DIExpression::isEqualExpression(LHS, false, Same, false));
+
+  Metadata *DifferentIdentity[] = {Second, nullptr, First};
+  auto *Different =
+      DIExpression::getDistinct(Context, Elements, DifferentIdentity);
+  EXPECT_FALSE(DIExpression::isEqualExpression(LHS, false, Different, false));
+
+  Metadata *DifferentOrder[] = {First, First, nullptr};
+  Different = DIExpression::getDistinct(Context, Elements, DifferentOrder);
+  EXPECT_FALSE(DIExpression::isEqualExpression(LHS, false, Different, false));
+
+  Metadata *DifferentMultiplicity[] = {First, nullptr};
+  Different =
+      DIExpression::getDistinct(Context, Elements, DifferentMultiplicity);
+  EXPECT_FALSE(DIExpression::isEqualExpression(LHS, false, Different, false));
+}
+
+TEST_F(DIExpressionRawOperandsTest, ConvertToUndefDropsRawOperands) {
+  Metadata *RawOperands[] = {getConstantAsMetadata()};
+  auto *Expression = DIExpression::get(
+      Context, {dwarf::DW_OP_lit0, dwarf::DW_OP_LLVM_fragment, 0, 32},
+      RawOperands);
+
+  const DIExpression *Undef =
+      DIExpression::convertToUndefExpression(Expression);
+  EXPECT_TRUE(Undef->isValid());
+  EXPECT_EQ(0u, Undef->getNumOperands());
+  EXPECT_EQ((ArrayRef<uint64_t>{dwarf::DW_OP_LLVM_fragment, 0, 32}),
+            Undef->getElements());
+}
+
+TEST_F(DIExpressionRawOperandsTest, PrintTreeIncludesOperandDefinitions) {
+  Metadata *Target = MDTuple::get(Context, MDString::get(Context, "target"));
+  auto *Expression = DIExpression::get(Context, {dwarf::DW_OP_lit0},
+                                       ArrayRef<Metadata *>{Target});
+  auto *Root = MDTuple::get(Context, Expression);
+
+  std::string Tree;
+  raw_string_ostream OS(Tree);
+  Root->printTree(OS);
+  EXPECT_NE(std::string::npos, Tree.find(" = !DIExpression(48, operands: {"))
+      << Tree;
+  EXPECT_NE(std::string::npos, Tree.find(" = !{!\"target\"}")) << Tree;
+}
+
 typedef MetadataTest DISubprogramTest;
 
 TEST_F(DISubprogramTest, get) {
@@ -3654,6 +3873,25 @@ TEST_F(DIExpressionTest, get) {
                       dwarf::DW_OP_deref, dwarf::DW_OP_stack_value};
   auto *N2 = DIExpression::append(N0, Elts2);
   EXPECT_EQ(N0WithPrependedOps, N2);
+
+  // Appending two stack-value expressions keeps a single stack-value marker.
+  auto *Left = DIExpression::get(
+      Context, {dwarf::DW_OP_deref, dwarf::DW_OP_stack_value});
+  // The argument deliberately equals the DW_OP_stack_value opcode to check
+  // that only complete stack-value operations are removed.
+  auto *Right = DIExpression::get(Context, {dwarf::DW_OP_plus_uconst,
+                                            dwarf::DW_OP_stack_value,
+                                            dwarf::DW_OP_stack_value});
+  auto *Combined = DIExpression::append(Left, Right);
+  uint64_t CombinedElements[] = {dwarf::DW_OP_deref, dwarf::DW_OP_plus_uconst,
+                                 dwarf::DW_OP_stack_value,
+                                 dwarf::DW_OP_stack_value};
+  EXPECT_EQ(ArrayRef(CombinedElements), Combined->getElements());
+  EXPECT_TRUE(Combined->isValid());
+  EXPECT_EQ(Left, DIExpression::append(Left, DIExpression::get(Context, {})));
+
+  auto *Replacement = N0->getWithReplacedElements({dwarf::DW_OP_lit0});
+  EXPECT_EQ(DIExpression::get(Context, {dwarf::DW_OP_lit0}), Replacement);
 }
 
 TEST_F(DIExpressionTest, Fold) {
@@ -4279,6 +4517,8 @@ TEST_F(DIExpressionTest, isValid) {
                dwarf::DW_OP_LLVM_fragment, 3, 7);
   EXPECT_VALID(dwarf::DW_OP_LLVM_entry_value, 1);
   EXPECT_VALID(dwarf::DW_OP_LLVM_arg, 0, dwarf::DW_OP_LLVM_entry_value, 1);
+  EXPECT_VALID(dwarf::DW_OP_reg0, dwarf::DW_OP_plus_uconst, 6);
+  EXPECT_VALID(dwarf::DW_OP_LLVM_entry_value, 1, dwarf::DW_OP_plus_uconst, 6);
 
   // Invalid constructions.
   EXPECT_INVALID(~0u);
@@ -4294,6 +4534,8 @@ TEST_F(DIExpressionTest, isValid) {
   EXPECT_INVALID(dwarf::DW_OP_LLVM_arg, 0, dwarf::DW_OP_plus_uconst, 5,
                  dwarf::DW_OP_LLVM_entry_value, 1);
   EXPECT_INVALID(dwarf::DW_OP_LLVM_arg, 1, dwarf::DW_OP_LLVM_entry_value, 1);
+  EXPECT_INVALID(dwarf::DW_OP_reg0, dwarf::DW_OP_plus_uconst);
+  EXPECT_INVALID(dwarf::DW_OP_LLVM_entry_value, 1, dwarf::DW_OP_plus_uconst);
 
 #undef EXPECT_VALID
 #undef EXPECT_INVALID
@@ -4452,6 +4694,24 @@ TEST_F(DIExpressionTest, extractLeadingOffset) {
   EXPECT_EQ(Remaining, OPS(DW_OP_LLVM_extract_bits_sext, 4, 4));
 #undef EXTRACT_FROM
 #undef OPS
+}
+
+TEST_F(DIExpressionTest, extractAddressClass) {
+  unsigned AddressClass = 0;
+  auto *Expression =
+      DIExpression::get(Context, {dwarf::DW_OP_deref, dwarf::DW_OP_constu, 5,
+                                  dwarf::DW_OP_swap, dwarf::DW_OP_xderef});
+  auto *Result = DIExpression::extractAddressClass(Expression, AddressClass);
+  EXPECT_EQ(5u, AddressClass);
+  EXPECT_EQ(DIExpression::get(Context, {dwarf::DW_OP_deref}), Result);
+
+  // Operation arguments that equal the address-class pattern's opcodes must
+  // not be interpreted as operations.
+  Expression = DIExpression::get(
+      Context, {dwarf::DW_OP_LLVM_convert, dwarf::DW_OP_constu, 5,
+                dwarf::DW_OP_swap, dwarf::DW_OP_xderef});
+  EXPECT_EQ(Expression,
+            DIExpression::extractAddressClass(Expression, AddressClass));
 }
 
 TEST_F(DIExpressionTest, convertToUndefExpression) {

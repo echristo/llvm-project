@@ -3475,8 +3475,9 @@ class DIExpression : public MDNode {
 
   std::vector<uint64_t> Elements;
 
-  DIExpression(LLVMContext &C, StorageType Storage, ArrayRef<uint64_t> Elements)
-      : MDNode(C, DIExpressionKind, Storage, {}),
+  DIExpression(LLVMContext &C, StorageType Storage, ArrayRef<uint64_t> Elements,
+               ArrayRef<Metadata *> RawOperands)
+      : MDNode(C, DIExpressionKind, Storage, RawOperands),
         Elements(Elements.begin(), Elements.end()) {}
   ~DIExpression() = default;
 
@@ -3484,17 +3485,42 @@ class DIExpression : public MDNode {
                                         ArrayRef<uint64_t> Elements,
                                         StorageType Storage,
                                         bool ShouldCreate = true);
+  LLVM_ABI static DIExpression *getImpl(LLVMContext &Context,
+                                        ArrayRef<uint64_t> Elements,
+                                        ArrayRef<Metadata *> RawOperands,
+                                        StorageType Storage,
+                                        bool ShouldCreate = true);
 
-  TempDIExpression cloneImpl() const {
-    return getTemporary(getContext(), getElements());
-  }
+  LLVM_ABI TempDIExpression cloneImpl() const;
 
 public:
+  /// Construct an expression without metadata operands. Use
+  /// getWithReplacedElements() to preserve operands from an existing
+  /// expression.
   DEFINE_MDNODE_GET(DIExpression, (ArrayRef<uint64_t> Elements), (Elements))
 
+  /// Construct an expression with ordered metadata operands. Operands are
+  /// stored through MDNode operand machinery and are part of the uniquing key.
+  /// isValid() requires the count to match what the operations declare.
+  /// Currently, no operation declares metadata operands, so valid expressions
+  /// have no metadata operands.
+  DEFINE_MDNODE_GET(DIExpression,
+                    (ArrayRef<uint64_t> Elements,
+                     ArrayRef<Metadata *> RawOperands),
+                    (Elements, RawOperands))
+
+  /// Return a temporary clone with the current raw operands.
   TempDIExpression clone() const { return cloneImpl(); }
 
   ArrayRef<uint64_t> getElements() const { return Elements; }
+
+  /// Return a uniqued expression with new elements and the same metadata
+  /// operands as this expression.
+  ///
+  /// \pre \p Elements is well-formed and consumes exactly the current number
+  /// of metadata operands.
+  LLVM_ABI DIExpression *
+  getWithReplacedElements(ArrayRef<uint64_t> Elements) const;
 
   unsigned getNumElements() const { return Elements.size(); }
 
@@ -3551,6 +3577,9 @@ public:
     /// Return the number of elements in the operand (1 + args).
     LLVM_ABI unsigned getSize() const;
 
+    /// Return the number of metadata operands consumed by this operation.
+    LLVM_ABI unsigned getNumMetadataOperands() const;
+
     /// Append the elements of this operand to \p V.
     void appendToVector(SmallVectorImpl<uint64_t> &V) const {
       V.append(get(), get() + getSize());
@@ -3605,9 +3634,10 @@ public:
 
   /// Visit the elements via ExprOperand wrappers.
   ///
-  /// These range iterators visit elements through \a ExprOperand wrappers.
-  /// This is not guaranteed to be a valid range unless \a isValid() gives \c
-  /// true.
+  /// These range iterators visit integer elements through \a ExprOperand
+  /// wrappers and omit metadata operands. Use \a DIExpressionCursor to visit
+  /// complete operations. This is not guaranteed to be a valid range unless
+  /// \a isValid() gives \c true.
   ///
   /// \pre \a isValid() gives \c true.
   /// @{
@@ -3622,6 +3652,8 @@ public:
   }
   /// @}
 
+  /// Return whether the operation stream is well-formed and its operations
+  /// account for every metadata operand.
   LLVM_ABI bool isValid() const;
 
   static bool classof(const Metadata *MD) {
@@ -3679,13 +3711,15 @@ public:
   /// the DWARF stack, including any DW_OP_LLVM_arg elements (making the result
   /// of this function always a single-location expression) while leaving
   /// everything that defines what the computed value applies to, i.e. the
-  /// fragment information.
+  /// fragment information. This replaces the computed location with undef and
+  /// drops the raw metadata operands.
   LLVM_ABI static const DIExpression *
   convertToUndefExpression(const DIExpression *Expr);
 
   /// If \p Expr is a non-variadic expression (i.e. one that does not contain
   /// DW_OP_LLVM_arg), returns \p Expr converted to variadic form by adding a
   /// leading [DW_OP_LLVM_arg, 0] to the expression; otherwise returns \p Expr.
+  /// Raw metadata operands are preserved.
   LLVM_ABI static const DIExpression *
   convertToVariadicExpression(const DIExpression *Expr);
 
@@ -3693,6 +3727,7 @@ public:
   /// single debug operand at the start of the expression, then return that
   /// expression in a non-variadic form by removing DW_OP_LLVM_arg from the
   /// expression if it is present; otherwise returns std::nullopt.
+  /// Raw metadata operands are preserved.
   /// See also `getSingleLocationExpressionElements` above, which skips
   /// checking `isSingleLocationExpression` and returns a list of elements
   /// rather than a DIExpression.
@@ -3711,7 +3746,8 @@ public:
   /// Determines whether two debug values should produce equivalent DWARF
   /// expressions, using their DIExpressions and directness, ignoring the
   /// differences between otherwise identical expressions in variadic and
-  /// non-variadic form and not considering the debug operands.
+  /// non-variadic form and not considering the debug operands. Raw metadata
+  /// operands are compared in order.
   /// \p FirstExpr is the DIExpression for the first debug value.
   /// \p FirstIndirect should be true if the first debug value is indirect; in
   /// IR this should be true for dbg.declare intrinsics and false for
@@ -3751,9 +3787,11 @@ public:
   /// `DW_OP_LLVM_arg, n` for all n in [0, N).
   LLVM_ABI bool hasAllLocationOps(unsigned N) const;
 
-  /// Checks if the last 4 elements of the expression are DW_OP_constu <DWARF
-  /// Address Space> DW_OP_swap DW_OP_xderef and extracts the <DWARF Address
-  /// Space>.
+  /// Checks if the last three operations are DW_OP_constu <DWARF Address
+  /// Space>, DW_OP_swap, and DW_OP_xderef, and extracts the <DWARF Address
+  /// Space>. On a match, the returned remainder is non-variadic: a leading
+  /// `DW_OP_LLVM_arg, 0` is removed, while other preceding operations and their
+  /// raw metadata operands are preserved.
   LLVM_ABI static const DIExpression *
   extractAddressClass(const DIExpression *Expr, unsigned &AddrClass);
 
@@ -3772,7 +3810,7 @@ public:
                                         int64_t Offset = 0);
 
   /// Prepend \p DIExpr with the given opcodes and optionally turn it into a
-  /// stack value.
+  /// stack value. The supplied opcodes must not use metadata operands.
   LLVM_ABI static DIExpression *prependOpcodes(const DIExpression *Expr,
                                                SmallVectorImpl<uint64_t> &Ops,
                                                bool StackValue = false,
@@ -3781,21 +3819,28 @@ public:
   /// Append the opcodes \p Ops to \p DIExpr. Unlike \ref appendToStack, the
   /// returned expression is a stack value only if \p DIExpr is a stack value.
   /// If \p DIExpr describes a fragment, the returned expression will describe
-  /// the same fragment.
+  /// the same fragment. The supplied opcodes must not use metadata operands.
   LLVM_ABI static DIExpression *append(const DIExpression *Expr,
                                        ArrayRef<uint64_t> Ops);
+
+  /// Append the operations and raw metadata operands from the second
+  /// expression to the first. The raw operands are concatenated in the same
+  /// order. If both expressions are stack values, the result contains a
+  /// single DW_OP_stack_value. An empty second expression returns the first.
+  LLVM_ABI static DIExpression *append(const DIExpression *Expr,
+                                       const DIExpression *Addition);
 
   /// Convert \p DIExpr into a stack value if it isn't one already by appending
   /// DW_OP_deref if needed, and appending \p Ops to the resulting expression.
   /// If \p DIExpr describes a fragment, the returned expression will describe
-  /// the same fragment.
+  /// the same fragment. The supplied opcodes must not use metadata operands.
   LLVM_ABI static DIExpression *appendToStack(const DIExpression *Expr,
                                               ArrayRef<uint64_t> Ops);
 
   /// Create a copy of \p Expr by appending the given list of \p Ops to each
   /// instance of the operand `DW_OP_LLVM_arg, \p ArgNo`. This is used to
   /// modify a specific location used by \p Expr, such as when salvaging that
-  /// location.
+  /// location. The supplied opcodes must not use metadata operands.
   LLVM_ABI static DIExpression *appendOpsToArg(const DIExpression *Expr,
                                                ArrayRef<uint64_t> Ops,
                                                unsigned ArgNo,
@@ -3916,13 +3961,18 @@ public:
 
   /// Try to shorten an expression with an initial constant operand.
   /// Returns a new expression and constant on success, or the original
-  /// expression and constant on failure.
+  /// expression and constant on failure. Raw metadata operands are preserved.
   LLVM_ABI std::pair<DIExpression *, const ConstantInt *>
   constantFold(const ConstantInt *CI);
 
   /// Try to shorten an expression with constant math operations that can be
-  /// evaluated at compile time. Returns a new expression on success, or the old
-  /// expression if there is nothing to be reduced.
+  /// evaluated at compile time. Returns a normally uniqued expression whose
+  /// elements may be unchanged if nothing can be reduced. Only operations that
+  /// use no metadata operands are rewritten. Operations that use metadata
+  /// operands remain in place and separate the ranges folded around them.
+  /// Existing raw metadata operands are preserved.
+  ///
+  /// \pre isValid() gives true.
   LLVM_ABI DIExpression *foldConstantMath();
 };
 
@@ -3949,75 +3999,129 @@ template <> struct DenseMapInfo<DIExpression::FragmentInfo> {
   static bool isEqual(const FragInfo &A, const FragInfo &B) { return A == B; }
 };
 
-/// Holds a DIExpression and keeps track of how many operands have been consumed
-/// so far.
+/// Traverses a DIExpression operation stream, keeping each operation paired
+/// with its metadata operands.
 class DIExpressionCursor {
+public:
+  /// An expression operation with its metadata operands. Borrows the cursor's
+  /// source storage.
+  class Operation {
+    friend class DIExpressionCursor;
+
+    DIExpression::ExprOperand Op;
+    ArrayRef<MDOperand> MetadataOperands;
+
+    Operation(DIExpression::ExprOperand Op,
+              ArrayRef<MDOperand> MetadataOperands)
+        : Op(Op), MetadataOperands(MetadataOperands) {
+      assert(getNumMetadataOperands() == MetadataOperands.size());
+    }
+
+  public:
+    /// Return the integer part of the operation, omitting metadata operands.
+    DIExpression::ExprOperand getExprOperand() const { return Op; }
+
+    const uint64_t *get() const { return Op.get(); }
+    uint64_t getOp() const { return Op.getOp(); }
+    uint64_t getArg(unsigned I) const { return Op.getArg(I); }
+    unsigned getNumArgs() const { return Op.getNumArgs(); }
+    unsigned getSize() const { return Op.getSize(); }
+    unsigned getNumMetadataOperands() const {
+      return Op.getNumMetadataOperands();
+    }
+    ArrayRef<MDOperand> getMetadataOperands() const { return MetadataOperands; }
+  };
+
+private:
   DIExpression::expr_op_iterator Start, End;
+  ArrayRef<MDOperand> MetadataOperands;
+
+  static std::optional<Operation>
+  getOperation(DIExpression::expr_op_iterator I,
+               DIExpression::expr_op_iterator E,
+               ArrayRef<MDOperand> MetadataOperands) {
+    if (I == E)
+      return std::nullopt;
+    unsigned NumMetadataOperands = I->getNumMetadataOperands();
+    assert(NumMetadataOperands <= MetadataOperands.size());
+    return Operation(*I, MetadataOperands.take_front(NumMetadataOperands));
+  }
 
 public:
+  /// Construct a cursor over a null or valid expression. Don't keep the cursor
+  /// or returned operations across RAUW or destruction of the expression.
   DIExpressionCursor(const DIExpression *Expr) {
     if (!Expr) {
       assert(Start == End);
       return;
     }
+    assert(Expr->isValid() && "invalid DIExpression");
     Start = Expr->expr_op_begin();
     End = Expr->expr_op_end();
+    MetadataOperands = Expr->operands();
   }
 
+  /// Construct a cursor over a well-formed integer-only operation stream.
   DIExpressionCursor(ArrayRef<uint64_t> Expr)
       : Start(Expr.begin()), End(Expr.end()) {}
 
   DIExpressionCursor(const DIExpressionCursor &) = default;
+  DIExpressionCursor &operator=(const DIExpressionCursor &) = default;
 
-  /// Consume one operation.
-  std::optional<DIExpression::ExprOperand> take() {
-    if (Start == End)
+  /// Consume one operation and its assigned metadata operands.
+  std::optional<Operation> take() {
+    std::optional<Operation> Op = peek();
+    if (!Op)
       return std::nullopt;
-    return *(Start++);
+    ++Start;
+    MetadataOperands =
+        MetadataOperands.drop_front(Op->getNumMetadataOperands());
+    return Op;
   }
 
-  /// Consume N operations.
-  void consume(unsigned N) { std::advance(Start, N); }
-
-  /// Return the current operation.
-  std::optional<DIExpression::ExprOperand> peek() const {
-    if (Start == End)
-      return std::nullopt;
-    return *(Start);
+  /// Consume N operations and their assigned metadata operands.
+  void consume(unsigned N) {
+    while (N--) {
+      assert(Start != End);
+      (void)take();
+    }
   }
 
-  /// Return the next operation.
-  std::optional<DIExpression::ExprOperand> peekNext() const {
-    if (Start == End)
-      return std::nullopt;
-
-    auto Next = Start.getNext();
-    if (Next == End)
-      return std::nullopt;
-
-    return *Next;
+  /// Return the current operation and its assigned metadata operands.
+  std::optional<Operation> peek() const {
+    return getOperation(Start, End, MetadataOperands);
   }
 
-  std::optional<DIExpression::ExprOperand> peekNextN(unsigned N) const {
-    if (Start == End)
-      return std::nullopt;
+  /// Return the next operation and its assigned metadata operands.
+  std::optional<Operation> peekNext() const { return peekNextN(1); }
+
+  /// Return the Nth operation and its metadata operands, or std::nullopt.
+  /// N == 0 returns the current operation.
+  std::optional<Operation> peekNextN(unsigned N) const {
     DIExpression::expr_op_iterator Nth = Start;
+    ArrayRef<MDOperand> NthMetadataOperands = MetadataOperands;
     for (unsigned I = 0; I < N; I++) {
-      Nth = Nth.getNext();
       if (Nth == End)
         return std::nullopt;
+      NthMetadataOperands =
+          NthMetadataOperands.drop_front(Nth->getNumMetadataOperands());
+      Nth = Nth.getNext();
     }
-    return *Nth;
+    return getOperation(Nth, End, NthMetadataOperands);
   }
 
+  /// Reset to a well-formed integer-only operation stream.
   void assignNewExpr(ArrayRef<uint64_t> Expr) {
     this->Start = DIExpression::expr_op_iterator(Expr.begin());
     this->End = DIExpression::expr_op_iterator(Expr.end());
+    this->MetadataOperands = {};
   }
 
   /// Determine whether there are any operations left in this expression.
   operator bool() const { return Start != End; }
 
+  /// Iterate remaining integer operations without consuming or pairing
+  /// operands.
   DIExpression::expr_op_iterator begin() const { return Start; }
   DIExpression::expr_op_iterator end() const { return End; }
 

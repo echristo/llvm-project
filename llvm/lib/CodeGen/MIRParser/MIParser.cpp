@@ -437,10 +437,12 @@ public:
   bool parseStandaloneRegister(Register &Reg);
   bool parseStandaloneStackObject(int &FI);
   bool parseStandaloneMDNode(MDNode *&Node);
+  bool predeclareMachineMetadata();
   bool parseMachineMetadata();
   bool parseMDTuple(MDNode *&MD, bool IsDistinct);
   bool parseMDNodeVector(SmallVectorImpl<Metadata *> &Elts);
   bool parseMetadata(Metadata *&MD);
+  MDNode *lookupMetadataNode(unsigned ID) const;
 
   bool
   parseBasicBlockDefinition(DenseMap<unsigned, MachineBasicBlock *> &MBBSlots);
@@ -482,7 +484,7 @@ public:
   bool parseExternalSymbolOperand(MachineOperand &Dest);
   bool parseMCSymbolOperand(MachineOperand &Dest);
   [[nodiscard]] bool parseMDNode(MDNode *&Node);
-  bool parseDIExpression(MDNode *&Expr);
+  bool parseDIExpression(MDNode *&Expr, bool IsDistinct = false);
   bool parseDILocation(MDNode *&Expr);
   bool parseMetadataOperand(MachineOperand &Dest);
   bool parseCFIOffset(int &Offset);
@@ -1358,13 +1360,18 @@ bool MIParser::parseMachineMetadata() {
   bool IsDistinct = Token.is(MIToken::kw_distinct);
   if (IsDistinct)
     lex();
-  if (Token.isNot(MIToken::exclaim))
-    return error("expected a metadata node");
-  lex();
 
-  MDNode *MD;
-  if (parseMDTuple(MD, IsDistinct))
-    return true;
+  MDNode *MD = nullptr;
+  if (Token.is(MIToken::md_diexpr)) {
+    if (parseDIExpression(MD, IsDistinct))
+      return true;
+  } else {
+    if (Token.isNot(MIToken::exclaim))
+      return error("expected a metadata node");
+    lex();
+    if (parseMDTuple(MD, IsDistinct))
+      return true;
+  }
 
   auto FI = PFS.MachineForwardRefMDNodes.find(ID);
   if (FI != PFS.MachineForwardRefMDNodes.end()) {
@@ -1379,6 +1386,31 @@ bool MIParser::parseMachineMetadata() {
     It->second.reset(MD);
   }
 
+  return false;
+}
+
+bool MIParser::predeclareMachineMetadata() {
+  lex();
+  if (Token.isNot(MIToken::exclaim))
+    return error("expected a metadata node");
+
+  lex();
+  if (Token.isNot(MIToken::IntegerLiteral) || Token.integerValue().isSigned())
+    return error("expected metadata id after '!'");
+  SMLoc Loc = mapSMLoc(Token.location());
+  unsigned ID = 0;
+  if (getUnsigned(ID))
+    return true;
+  if (PFS.IRSlots.MetadataNodes.count(ID))
+    return error("Metadata id is already used");
+  auto [It, Inserted] = PFS.MachineMetadataNodes.try_emplace(ID);
+  if (!Inserted)
+    return error("Metadata id is already used");
+
+  auto Temporary = MDTuple::getTemporary(MF.getFunction().getContext(), {});
+  It->second.reset(Temporary.get());
+  PFS.MachineForwardRefMDNodes.emplace(
+      ID, std::make_pair(std::move(Temporary), Loc));
   return false;
 }
 
@@ -1445,15 +1477,8 @@ bool MIParser::parseMetadata(Metadata *&MD) {
     return true;
   lex();
 
-  auto NodeInfo = PFS.IRSlots.MetadataNodes.find(ID);
-  if (NodeInfo != PFS.IRSlots.MetadataNodes.end()) {
-    MD = NodeInfo->second.get();
-    return false;
-  }
-  // Check machine metadata.
-  NodeInfo = PFS.MachineMetadataNodes.find(ID);
-  if (NodeInfo != PFS.MachineMetadataNodes.end()) {
-    MD = NodeInfo->second.get();
+  if (MDNode *Node = lookupMetadataNode(ID)) {
+    MD = Node;
     return false;
   }
   // Forward reference.
@@ -2538,22 +2563,31 @@ bool MIParser::parseMDNode(MDNode *&Node) {
   unsigned ID;
   if (getUnsigned(ID))
     return true;
-  auto NodeInfo = PFS.IRSlots.MetadataNodes.find(ID);
-  if (NodeInfo == PFS.IRSlots.MetadataNodes.end()) {
-    NodeInfo = PFS.MachineMetadataNodes.find(ID);
-    if (NodeInfo == PFS.MachineMetadataNodes.end())
-      return error(Loc, "use of undefined metadata '!" + Twine(ID) + "'");
-  }
+  Node = lookupMetadataNode(ID);
+  if (!Node)
+    return error(Loc, "use of undefined metadata '!" + Twine(ID) + "'");
   lex();
-  Node = NodeInfo->second.get();
   return false;
 }
 
-bool MIParser::parseDIExpression(MDNode *&Expr) {
+MDNode *MIParser::lookupMetadataNode(unsigned ID) const {
+  // IR and machine metadata share one numeric namespace.
+  auto IRNode = PFS.IRSlots.MetadataNodes.find(ID);
+  if (IRNode != PFS.IRSlots.MetadataNodes.end())
+    return IRNode->second.get();
+  auto MachineNode = PFS.MachineMetadataNodes.find(ID);
+  return MachineNode == PFS.MachineMetadataNodes.end()
+             ? nullptr
+             : MachineNode->second.get();
+}
+
+bool MIParser::parseDIExpression(MDNode *&Expr, bool IsDistinct) {
+  auto LookupMetadata = [&](unsigned ID) { return lookupMetadataNode(ID); };
+
   unsigned Read;
   Expr = llvm::parseDIExpressionBodyAtBeginning(
       CurrentSource, Read, Error, *PFS.MF.getFunction().getParent(),
-      &PFS.IRSlots);
+      PFS.IRSlots, LookupMetadata, IsDistinct);
   CurrentSource = CurrentSource.substr(Read);
   lex();
   if (!Expr)
@@ -4055,6 +4089,12 @@ bool llvm::parseMDNode(PerFunctionMIParsingState &PFS, MDNode *&Node,
 bool llvm::parseMachineMetadata(PerFunctionMIParsingState &PFS, StringRef Src,
                                 SMRange SrcRange, SMDiagnostic &Error) {
   return MIParser(PFS, Error, Src, SrcRange).parseMachineMetadata();
+}
+
+bool llvm::predeclareMachineMetadata(PerFunctionMIParsingState &PFS,
+                                     StringRef Src, SMRange SrcRange,
+                                     SMDiagnostic &Error) {
+  return MIParser(PFS, Error, Src, SrcRange).predeclareMachineMetadata();
 }
 
 bool MIRFormatter::parseIRValue(StringRef Src, MachineFunction &MF,

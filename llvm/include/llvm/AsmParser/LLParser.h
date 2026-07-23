@@ -134,6 +134,9 @@ namespace llvm {
 
     std::map<unsigned, TrackingMDNodeRef> NumberedMetadata;
     std::map<unsigned, std::pair<TempMDTuple, LocTy>> ForwardRefMDNodes;
+    // Lookup state used by parseDIExpressionBodyAtBeginning().
+    const SlotMapping *StandaloneSlots = nullptr;
+    function_ref<MDNode *(unsigned)> StandaloneMetadataLookup{};
 
     // Global Value reference information.
     std::map<std::string, std::pair<GlobalValue*, LocTy> > ForwardRefVals;
@@ -231,9 +234,9 @@ namespace llvm {
     LLVM_ABI bool parseTypeAtBeginning(Type *&Ty, unsigned &Read,
                                        const SlotMapping *Slots);
 
-    LLVM_ABI bool parseDIExpressionBodyAtBeginning(MDNode *&Result,
-                                                   unsigned &Read,
-                                                   const SlotMapping *Slots);
+    LLVM_ABI bool parseDIExpressionBodyAtBeginning(
+        MDNode *&Result, unsigned &Read, const SlotMapping *Slots,
+        function_ref<MDNode *(unsigned)> LookupMetadata, bool IsDistinct);
 
     LLVMContext &getContext() { return Context; }
 

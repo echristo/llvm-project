@@ -172,7 +172,9 @@ struct PerFunctionMIParsingState {
   const SlotMapping &IRSlots;
   PerTargetMIParsingState &Target;
 
+  // Machine metadata slots, including predeclared temporary nodes.
   std::map<unsigned, TrackingMDNodeRef> MachineMetadataNodes;
+  // Unresolved temporaries and their diagnostic locations.
   std::map<unsigned, std::pair<TempMDTuple, SMLoc>> MachineForwardRefMDNodes;
 
   DenseMap<unsigned, MachineBasicBlock *> MBBSlots;
@@ -249,9 +251,19 @@ LLVM_ABI bool parsePrefetchTarget(PerFunctionMIParsingState &PFS,
 LLVM_ABI bool parseMDNode(PerFunctionMIParsingState &PFS, MDNode *&Node,
                           StringRef Src, SMDiagnostic &Error);
 
+/// Parse one machine metadata definition from \p Src; call
+/// predeclareMachineMetadata() first so forward references resolve.
+/// Returns true and populates \p Error on failure.
 LLVM_ABI bool parseMachineMetadata(PerFunctionMIParsingState &PFS,
                                    StringRef Src, SMRange SourceRange,
                                    SMDiagnostic &Error);
+
+/// Predeclare one machine metadata definition with a temporary node so
+/// parseMachineMetadata() can resolve forward references and cycles.
+/// Returns true and populates \p Error on a parse error or duplicate ID.
+LLVM_ABI bool predeclareMachineMetadata(PerFunctionMIParsingState &PFS,
+                                        StringRef Src, SMRange SourceRange,
+                                        SMDiagnostic &Error);
 
 } // end namespace llvm
 

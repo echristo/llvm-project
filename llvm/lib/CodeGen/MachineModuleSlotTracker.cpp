@@ -9,6 +9,7 @@
 #include "llvm/CodeGen/MachineModuleSlotTracker.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Module.h"
 
 using namespace llvm;
@@ -17,7 +18,15 @@ void MachineModuleSlotTracker::processMachineFunctionMetadata(
     AbstractSlotTrackerStorage *AST, const MachineFunction &MF) {
   // Create metadata created within the backend.
   for (const MachineBasicBlock &MBB : MF)
-    for (const MachineInstr &MI : MBB.instrs())
+    for (const MachineInstr &MI : MBB.instrs()) {
+      // Expressions with metadata operands need a slot; others print inline.
+      for (const MachineOperand &MO : MI.operands()) {
+        if (!MO.isMetadata())
+          continue;
+        auto *Expression = dyn_cast_or_null<DIExpression>(MO.getMetadata());
+        if (Expression && Expression->getNumOperands())
+          AST->createMetadataSlot(Expression);
+      }
       for (const MachineMemOperand *MMO : MI.memoperands()) {
         AAMDNodes AAInfo = MMO->getAAInfo();
         if (AAInfo.TBAA)
@@ -29,6 +38,7 @@ void MachineModuleSlotTracker::processMachineFunctionMetadata(
         if (AAInfo.NoAlias)
           AST->createMetadataSlot(AAInfo.NoAlias);
       }
+    }
 }
 
 void MachineModuleSlotTracker::processMachineModule(

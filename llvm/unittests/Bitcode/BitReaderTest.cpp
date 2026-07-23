@@ -10,9 +10,13 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/Bitcode/LLVMBitCodes.h"
+#include "llvm/Bitstream/BitstreamWriter.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/DebugProgramInstruction.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
@@ -54,6 +58,116 @@ static void writeModuleToBuffer(std::unique_ptr<Module> Mod,
                                 SmallVectorImpl<char> &Buffer) {
   raw_svector_ostream OS(Buffer);
   WriteBitcodeToFile(*Mod, OS);
+}
+
+static SmallVector<char>
+writeDIExpressionRecord(ArrayRef<uint64_t> ExpressionRecord) {
+  SmallVector<char> Buffer;
+  BitstreamWriter Stream(Buffer);
+  Stream.Emit('B', 8);
+  Stream.Emit('C', 8);
+  Stream.Emit(0, 4);
+  Stream.Emit(0xC, 4);
+  Stream.Emit(0xE, 4);
+  Stream.Emit(0xD, 4);
+  Stream.EnterSubblock(bitc::MODULE_BLOCK_ID, 3);
+  Stream.EmitRecord(bitc::MODULE_CODE_VERSION, ArrayRef<uint64_t>{2});
+  Stream.EnterSubblock(bitc::METADATA_BLOCK_ID, 3);
+  Stream.EmitRecord(bitc::METADATA_EXPRESSION, ExpressionRecord);
+  SmallVector<uint64_t> Name;
+  for (char C : StringRef("test.expression"))
+    Name.push_back(C);
+  Stream.EmitRecord(bitc::METADATA_NAME, Name);
+  Stream.EmitRecord(bitc::METADATA_NAMED_NODE, ArrayRef<uint64_t>{0});
+  Stream.ExitBlock();
+  Stream.ExitBlock();
+  return Buffer;
+}
+
+TEST(BitReaderTest, RejectsMalformedMetadataBearingDIExpression) {
+  const uint64_t MissingElementCount[] = {8};
+  const uint64_t InvalidElementCount[] = {8, 2, dwarf::DW_OP_lit0};
+  for (ArrayRef<uint64_t> Record :
+       {ArrayRef(MissingElementCount), ArrayRef(InvalidElementCount)}) {
+    SmallVector<char> Buffer = writeDIExpressionRecord(Record);
+    LLVMContext Context;
+    Expected<std::unique_ptr<Module>> M = parseBitcodeFile(
+        MemoryBufferRef(StringRef(Buffer.data(), Buffer.size()), "test"),
+        Context);
+    ASSERT_FALSE(static_cast<bool>(M));
+    EXPECT_NE(std::string::npos,
+              toString(M.takeError()).find("Invalid record"));
+  }
+}
+
+TEST(BitReaderTest, AcceptsZeroOperandVersion4DIExpression) {
+  const uint64_t Record[] = {8, 1, dwarf::DW_OP_lit0};
+  SmallVector<char> Buffer = writeDIExpressionRecord(Record);
+  LLVMContext Context;
+  Expected<std::unique_ptr<Module>> M = parseBitcodeFile(
+      MemoryBufferRef(StringRef(Buffer.data(), Buffer.size()), "test"),
+      Context);
+  if (!M)
+    FAIL() << toString(M.takeError());
+
+  NamedMDNode *Named = (*M)->getNamedMetadata("test.expression");
+  ASSERT_NE(nullptr, Named);
+  ASSERT_EQ(1u, Named->getNumOperands());
+  auto *Expression = cast<DIExpression>(Named->getOperand(0));
+  EXPECT_EQ(ArrayRef<uint64_t>{dwarf::DW_OP_lit0}, Expression->getElements());
+  EXPECT_EQ(0u, Expression->getNumOperands());
+  EXPECT_TRUE(Expression->isValid());
+}
+
+// DW_OP_lit0 does not use metadata operands, so this is not a valid
+// DIExpression and cannot be used to produce DWARF. It only exercises the
+// generic bitcode representation.
+TEST(BitReaderTest, MetadataBearingDIExpressionRoundTrip) {
+  LLVMContext WriteContext;
+  auto M = std::make_unique<Module>("test", WriteContext);
+  Metadata *Target =
+      MDTuple::get(WriteContext, MDString::get(WriteContext, "target"));
+  Metadata *RawOperands[] = {Target, nullptr,
+                             ConstantAsMetadata::get(ConstantInt::get(
+                                 Type::getInt32Ty(WriteContext), 7)),
+                             Target};
+  auto *Expression =
+      DIExpression::get(WriteContext, {dwarf::DW_OP_lit0}, RawOperands);
+  NamedMDNode *Named = M->getOrInsertNamedMetadata("expressions");
+  Named->addOperand(Expression);
+  auto *Cycle = DIExpression::getDistinct(WriteContext, {dwarf::DW_OP_lit0},
+                                          ArrayRef<Metadata *>{nullptr});
+  Cycle->replaceOperandWith(0, Cycle);
+  Named->addOperand(Cycle);
+
+  SmallVector<char> Buffer;
+  writeModuleToBuffer(std::move(M), Buffer);
+
+  LLVMContext ReadContext;
+  Expected<std::unique_ptr<Module>> RoundTrip = parseBitcodeFile(
+      MemoryBufferRef(StringRef(Buffer.data(), Buffer.size()), "test"),
+      ReadContext);
+  if (!RoundTrip)
+    FAIL() << toString(RoundTrip.takeError());
+
+  Named = (*RoundTrip)->getNamedMetadata("expressions");
+  ASSERT_NE(nullptr, Named);
+  ASSERT_EQ(2u, Named->getNumOperands());
+  auto *ReadExpression = cast<DIExpression>(Named->getOperand(0));
+  EXPECT_EQ(ArrayRef<uint64_t>{dwarf::DW_OP_lit0},
+            ReadExpression->getElements());
+  ASSERT_EQ(4u, ReadExpression->getNumOperands());
+  EXPECT_EQ(ReadExpression->getOperand(0), ReadExpression->getOperand(3));
+  EXPECT_EQ(nullptr, ReadExpression->getOperand(1));
+  auto *Value =
+      mdconst::dyn_extract<ConstantInt>(ReadExpression->getOperand(2));
+  ASSERT_NE(nullptr, Value);
+  EXPECT_EQ(7u, Value->getZExtValue());
+
+  auto *ReadCycle = cast<DIExpression>(Named->getOperand(1));
+  EXPECT_TRUE(ReadCycle->isDistinct());
+  ASSERT_EQ(1u, ReadCycle->getNumOperands());
+  EXPECT_EQ(ReadCycle, ReadCycle->getOperand(0));
 }
 
 static std::unique_ptr<Module> getLazyModuleFromAssembly(LLVMContext &Context,

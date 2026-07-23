@@ -1603,7 +1603,8 @@ LogicalResult ModuleImport::convertGlobal(llvm::GlobalVariable *globalVar) {
   for (llvm::DIGlobalVariableExpression *expr : globalExpressions) {
     DIGlobalVariableExpressionAttr globalExpressionAttr =
         debugImporter->translateGlobalVariableExpression(expr);
-    globalExpressionAttrs.push_back(globalExpressionAttr);
+    if (globalExpressionAttr)
+      globalExpressionAttrs.push_back(globalExpressionAttr);
   }
 
   // Workaround to support LLVM's nameless globals. MLIR, in contrast to LLVM,
@@ -3382,6 +3383,10 @@ ModuleImport::processDebugOpArgumentsAndInsertionPt(
   DILocalVariableAttr localVarAttr = matchLocalVariableAttr(variable);
   if (!localVarAttr)
     return {};
+  DIExpressionAttr expressionAttr =
+      debugImporter->translateExpression(expression);
+  if (expression && !expressionAttr)
+    return {};
   FailureOr<Value> argOperand = convertArgOperandToValue();
   if (failed(argOperand)) {
     emitError(loc) << "failed to convert a debug operand: " << diag(*address);
@@ -3392,8 +3397,7 @@ ModuleImport::processDebugOpArgumentsAndInsertionPt(
           .failed())
     return {};
 
-  return {localVarAttr, debugImporter->translateExpression(expression),
-          *argOperand};
+  return {localVarAttr, expressionAttr, *argOperand};
 }
 
 LogicalResult

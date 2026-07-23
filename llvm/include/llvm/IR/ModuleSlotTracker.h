@@ -99,9 +99,12 @@ public:
   void setProcessHook(std::function<void(AbstractSlotTrackerStorage *,
                                          const Function *, bool)>);
 
+  /// Metadata slot/node pairs used when printing machine metadata.
   using MachineMDNodeListType =
       std::vector<std::pair<unsigned, const MDNode *>>;
 
+  /// Append metadata nodes with slots in [\p LB, \p UB) to \p L and order the
+  /// result by slot number.
   void collectMDNodes(MachineMDNodeListType &L, unsigned LB, unsigned UB) const;
 };
 

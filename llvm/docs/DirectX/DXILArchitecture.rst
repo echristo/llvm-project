@@ -102,6 +102,9 @@ leverage LLVM's current bitcode libraries to do a lot of the work, but
 it's possible that at some point in the future it will need to be
 completely separate as modern LLVM bitcode evolves.
 
+DXIL cannot represent LLVM ``DIExpression`` metadata operands. The DXIL
+writer rejects expressions that contain them.
+
 DirectX Backend Flow
 --------------------
 

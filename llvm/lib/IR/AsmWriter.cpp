@@ -1244,19 +1244,21 @@ void SlotTracker::processDbgRecordMetadata(const DbgRecord &DR) {
   // autoupgraded into debug records. This gets caught by the verifier, which
   // then will print the faulty IR, hitting this code path.
   if (const auto *DVR = dyn_cast<const DbgVariableRecord>(&DR)) {
-    // Process metadata used by DbgRecords; we only specifically care about the
-    // DILocalVariable, DILocation, and DIAssignID fields, as the Value and
-    // Expression fields should only be printed inline and so do not use a slot.
-    // Note: The above doesn't apply for empty-metadata operands.
+    // Expressions with operands need slots; others still print inline.
     if (auto *Empty = dyn_cast_if_present<MDNode>(DVR->getRawLocation()))
       CreateMetadataSlot(Empty);
     if (DVR->getRawVariable())
       CreateMetadataSlot(DVR->getRawVariable());
+    if (auto *Expression = dyn_cast_if_present<MDNode>(DVR->getRawExpression()))
+      CreateMetadataSlot(Expression);
     if (DVR->isDbgAssign()) {
       if (auto *AssignID = DVR->getRawAssignID())
         CreateMetadataSlot(cast<MDNode>(AssignID));
       if (auto *Empty = dyn_cast_if_present<MDNode>(DVR->getRawAddress()))
         CreateMetadataSlot(Empty);
+      if (auto *Expression =
+              dyn_cast_if_present<MDNode>(DVR->getRawAddressExpression()))
+        CreateMetadataSlot(Expression);
     }
   } else if (const auto *DLR = dyn_cast<const DbgLabelRecord>(&DR)) {
     CreateMetadataSlot(DLR->getRawLabel());
@@ -1420,8 +1422,8 @@ void SlotTracker::CreateFunctionSlot(const Value *V) {
 void SlotTracker::CreateMetadataSlot(const MDNode *N) {
   assert(N && "Can't insert a null Value into SlotTracker!");
 
-  // Don't make slots for DIExpressions. We just print them inline everywhere.
-  if (isa<DIExpression>(N))
+  // Expressions with metadata operands need a slot; others print inline.
+  if (isa<DIExpression>(N) && !N->getNumOperands())
     return;
 
   unsigned DestSlot = mdnNext;
@@ -2658,6 +2660,15 @@ static void writeDIExpression(raw_ostream &Out, const DIExpression *N,
     for (const auto &I : N->getElements())
       Out << FS << I;
   }
+  if (N->getNumOperands()) {
+    Out << FS << "operands: {";
+    ListSeparator IFS;
+    for (const MDOperand &Operand : N->operands()) {
+      Out << IFS;
+      writeMetadataAsOperand(Out, Operand.get(), WriterCtx);
+    }
+    Out << "}";
+  }
   Out << ")";
 }
 
@@ -2822,9 +2833,10 @@ static void writeAsOperandInternal(raw_ostream &Out, const Value *V,
 static void writeAsOperandInternal(raw_ostream &Out, const Metadata *MD,
                                    AsmWriterContext &WriterCtx,
                                    bool FromValue) {
-  // Write DIExpressions and DIArgLists inline when used as a value. Improves
-  // readability of debug info intrinsics.
-  if (const auto *Expr = dyn_cast<DIExpression>(MD)) {
+  // Write DIExpressions without operands and DIArgLists inline when used as a
+  // value. Improves readability of debug info intrinsics.
+  if (const auto *Expr = dyn_cast<DIExpression>(MD);
+      Expr && !Expr->getNumOperands()) {
     writeDIExpression(Out, Expr, WriterCtx);
     return;
   }
@@ -3843,9 +3855,10 @@ void AssemblyWriter::printNamedMDNode(const NamedMDNode *NMD) {
   ListSeparator LS;
   for (const MDNode *Op : NMD->operands()) {
     Out << LS;
-    // Write DIExpressions inline.
+    // Write DIExpressions without operands inline.
     // FIXME: Ban DIExpressions in NamedMDNodes, they will serve no purpose.
-    if (auto *Expr = dyn_cast<DIExpression>(Op)) {
+    if (auto *Expr = dyn_cast<DIExpression>(Op);
+        Expr && !Expr->getNumOperands()) {
       writeDIExpression(Out, Expr, AsmWriterContext::getEmpty());
       continue;
     }
@@ -5368,7 +5381,7 @@ static void printMetadataImplRec(raw_ostream &ROS, const Metadata &MD,
   writeAsOperandInternal(OS, &MD, WriterCtx, /* FromValue */ true);
 
   auto *N = dyn_cast<MDNode>(&MD);
-  if (!N || isa<DIExpression>(MD))
+  if (!N || (isa<DIExpression>(MD) && !N->getNumOperands()))
     return;
 
   OS << " = ";
@@ -5436,7 +5449,7 @@ static void printMetadataImpl(raw_ostream &ROS, const Metadata &MD,
   writeAsOperandInternal(OS, &MD, *WriterCtx, /* FromValue */ true);
 
   auto *N = dyn_cast<MDNode>(&MD);
-  if (OnlyAsOperand || !N || isa<DIExpression>(MD))
+  if (OnlyAsOperand || !N || (isa<DIExpression>(MD) && !N->getNumOperands()))
     return;
 
   OS << " = ";
@@ -5492,6 +5505,9 @@ void ModuleSlotTracker::collectMDNodes(MachineMDNodeListType &L, unsigned LB,
   for (auto &I : llvm::make_range(ST->mdn_begin(), ST->mdn_end()))
     if (I.second >= LB && I.second < UB)
       L.push_back(std::make_pair(I.second, I.first));
+  llvm::sort(L, [](const auto &LHS, const auto &RHS) {
+    return LHS.first < RHS.first;
+  });
 }
 
 #if !defined(NDEBUG) || defined(LLVM_ENABLE_DUMP)

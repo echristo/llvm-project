@@ -11,6 +11,7 @@ set(LLVM_LINK_COMPONENTS
   DirectXDesc
   DirectXInfo
   DirectXIRPasses
+  DXILBitWriter
   MC
   Passes
   Support
@@ -19,6 +20,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_llvm_target_unittest(DirectXTests
   CBufferDataLayoutTests.cpp
+  DXILBitcodeWriterTests.cpp
   PointerTypeAnalysisTests.cpp
   UniqueResourceFromUseTests.cpp
   RegisterCostTests.cpp

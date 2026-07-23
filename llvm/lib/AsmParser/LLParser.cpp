@@ -121,15 +121,19 @@ bool LLParser::parseTypeAtBeginning(Type *&Ty, unsigned &Read,
   return false;
 }
 
-bool LLParser::parseDIExpressionBodyAtBeginning(MDNode *&Result, unsigned &Read,
-                                                const SlotMapping *Slots) {
-  restoreParsingState(Slots);
+bool LLParser::parseDIExpressionBodyAtBeginning(
+    MDNode *&Result, unsigned &Read, const SlotMapping *Slots,
+    function_ref<MDNode *(unsigned)> LookupMetadata, bool IsDistinct) {
+  // Borrow the caller's lookup state only for this standalone parse.
+  SaveAndRestore<const SlotMapping *> SlotsGuard(StandaloneSlots, Slots);
+  SaveAndRestore<function_ref<MDNode *(unsigned)>> MetadataLookupGuard(
+      StandaloneMetadataLookup, LookupMetadata);
   Lex.Lex();
 
   Read = 0;
   SMLoc Start = Lex.getLoc();
   Result = nullptr;
-  bool Status = parseDIExpressionBody(Result, /*IsDistinct=*/false);
+  bool Status = parseDIExpressionBody(Result, IsDistinct);
   SMLoc End = Lex.getLoc();
   Read = End.getPointer() - Start.getPointer();
 
@@ -1004,6 +1008,15 @@ bool LLParser::parseMDNodeID(MDNode *&Result) {
   unsigned MID = 0;
   if (parseUInt32(MID))
     return true;
+
+  if (StandaloneSlots) {
+    if (!StandaloneMetadataLookup)
+      return error(IDLoc, "use of undefined metadata '!" + Twine(MID) + "'");
+    Result = StandaloneMetadataLookup(MID);
+    if (!Result)
+      return error(IDLoc, "use of undefined metadata '!" + Twine(MID) + "'");
+    return false;
+  }
 
   // If not a forward reference, just return it now.
   auto [It, Inserted] = NumberedMetadata.try_emplace(MID);
@@ -1892,6 +1905,11 @@ GlobalValue *LLParser::getGlobalVal(const std::string &Name, Type *Ty,
     return cast_or_null<GlobalValue>(
         checkValidVariableType(Loc, "@" + Name, Ty, Val));
 
+  if (StandaloneSlots) {
+    error(Loc, "use of undefined global '@" + Name + "'");
+    return nullptr;
+  }
+
   // Otherwise, create a new forward reference for this value and remember it.
   GlobalValue *FwdVal = createGlobalFwdRef(M, PTy);
   ForwardRefVals[Name] = std::make_pair(FwdVal, Loc);
@@ -1906,6 +1924,8 @@ GlobalValue *LLParser::getGlobalVal(unsigned ID, Type *Ty, LocTy Loc) {
   }
 
   GlobalValue *Val = NumberedVals.get(ID);
+  if (!Val && StandaloneSlots)
+    Val = StandaloneSlots->GlobalValues.get(ID);
 
   // If this is a forward reference for the value, see if we already created a
   // forward ref record.
@@ -1919,6 +1939,11 @@ GlobalValue *LLParser::getGlobalVal(unsigned ID, Type *Ty, LocTy Loc) {
   if (Val)
     return cast_or_null<GlobalValue>(
         checkValidVariableType(Loc, "@" + Twine(ID), Ty, Val));
+
+  if (StandaloneSlots) {
+    error(Loc, "use of undefined global '@" + Twine(ID) + "'");
+    return nullptr;
+  }
 
   // Otherwise, create a new forward reference for this value and remember it.
   GlobalValue *FwdVal = createGlobalFwdRef(M, PTy);
@@ -3233,6 +3258,15 @@ bool LLParser::parseType(Type *&Result, const Twine &Msg, bool AllowVoid) {
     break;
   case lltok::LocalVar: {
     // Type ::= %foo
+    if (StandaloneSlots) {
+      auto It = StandaloneSlots->NamedTypes.find(Lex.getStrVal());
+      if (It == StandaloneSlots->NamedTypes.end())
+        return tokError("use of undefined type named '%" + Lex.getStrVal() +
+                        "'");
+      Result = It->second;
+      Lex.Lex();
+      break;
+    }
     std::pair<Type*, LocTy> &Entry = NamedTypes[Lex.getStrVal()];
 
     // If the type hasn't been defined yet, create a forward definition and
@@ -3248,6 +3282,15 @@ bool LLParser::parseType(Type *&Result, const Twine &Msg, bool AllowVoid) {
 
   case lltok::LocalVarID: {
     // Type ::= %4
+    if (StandaloneSlots) {
+      auto It = StandaloneSlots->Types.find(Lex.getUIntVal());
+      if (It == StandaloneSlots->Types.end())
+        return tokError("use of undefined type '%" + Twine(Lex.getUIntVal()) +
+                        "'");
+      Result = It->second;
+      Lex.Lex();
+      break;
+    }
     std::pair<Type*, LocTy> &Entry = NumberedTypes[Lex.getUIntVal()];
 
     // If the type hasn't been defined yet, create a forward definition and
@@ -6584,14 +6627,26 @@ bool LLParser::parseDILabel(MDNode *&Result, bool IsDistinct) {
 }
 
 /// parseDIExpressionBody:
-///   ::= (0, 7, -1)
+///   ::= (0, 7, 42, operands: {!0, null, !1})
 bool LLParser::parseDIExpressionBody(MDNode *&Result, bool IsDistinct) {
   if (parseToken(lltok::lparen, "expected '(' here"))
     return true;
 
   SmallVector<uint64_t, 8> Elements;
+  SmallVector<Metadata *, 4> RawOperands;
   if (Lex.getKind() != lltok::rparen)
     do {
+      if (Lex.getKind() == lltok::LabelStr) {
+        if (Lex.getStrVal() != "operands")
+          return tokError("expected unsigned integer or 'operands:'");
+        Lex.Lex();
+        if (parseMDNodeVector(RawOperands))
+          return true;
+        if (Lex.getKind() != lltok::rparen)
+          return tokError("'operands:' must be the final field");
+        break;
+      }
+
       if (Lex.getKind() == lltok::DwarfOp) {
         if (unsigned Op = dwarf::getOperationEncoding(Lex.getStrVal())) {
           Lex.Lex();
@@ -6624,12 +6679,12 @@ bool LLParser::parseDIExpressionBody(MDNode *&Result, bool IsDistinct) {
   if (parseToken(lltok::rparen, "expected ')' here"))
     return true;
 
-  Result = GET_OR_DISTINCT(DIExpression, (Context, Elements));
+  Result = GET_OR_DISTINCT(DIExpression, (Context, Elements, RawOperands));
   return false;
 }
 
 /// parseDIExpression:
-///   ::= !DIExpression(0, 7, -1)
+///   ::= !DIExpression(0, 7, 42)
 bool LLParser::parseDIExpression(MDNode *&Result, bool IsDistinct) {
   assert(Lex.getKind() == lltok::MetadataVar && "Expected metadata type name");
   assert(Lex.getStrVal() == "DIExpression" && "Expected '!DIExpression'");
@@ -6641,8 +6696,9 @@ bool LLParser::parseDIExpression(MDNode *&Result, bool IsDistinct) {
 /// ParseDIArgList:
 ///   ::= !DIArgList(i32 7, i64 %0)
 bool LLParser::parseDIArgList(Metadata *&MD, PerFunctionState *PFS) {
-  assert(PFS && "Expected valid function state");
   assert(Lex.getKind() == lltok::MetadataVar && "Expected metadata type name");
+  if (!PFS)
+    return tokError("DIArgList is only valid in a function");
   Lex.Lex();
 
   if (parseToken(lltok::lparen, "expected '(' here"))

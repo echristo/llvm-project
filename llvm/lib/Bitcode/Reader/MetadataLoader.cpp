@@ -632,7 +632,7 @@ class MetadataLoader::MetadataLoaderImpl {
         return;
       SmallVector<uint64_t, 8> Ops;
       Ops.append(std::next(DIExpr->elements_begin()), DIExpr->elements_end());
-      Declare->setExpression(DIExpression::get(Context, Ops));
+      Declare->setExpression(DIExpr->getWithReplacedElements(Ops));
     };
 
     for (auto &BB : F)
@@ -721,6 +721,7 @@ class MetadataLoader::MetadataLoaderImpl {
       [[fallthrough]];
     }
     case 3:
+    case 4:
       // Up-to-date!
       break;
     }
@@ -2374,14 +2375,31 @@ Error MetadataLoader::MetadataLoaderImpl::parseOneMetadata(
 
     IsDistinct = Record[0] & 1;
     uint64_t Version = Record[0] >> 1;
-    auto Elts = MutableArrayRef<uint64_t>(Record).slice(1);
+    MutableArrayRef<uint64_t> Elts;
+    ArrayRef<uint64_t> RawOperandIDs;
+    if (Version == 4) {
+      // Version 4 stores the element count before the elements and metadata
+      // IDs. The reader accepts an empty metadata ID list; the writer uses
+      // version 3 in that case.
+      if (Record.size() < 2 || Record[1] > Record.size() - 2)
+        return error("Invalid record");
+      Elts = MutableArrayRef<uint64_t>(Record).slice(2, Record[1]);
+      RawOperandIDs = ArrayRef<uint64_t>(Record).slice(2 + Record[1]);
+    } else {
+      Elts = MutableArrayRef<uint64_t>(Record).slice(1);
+    }
 
     SmallVector<uint64_t, 6> Buffer;
     if (Error Err = upgradeDIExpression(Version, Elts, Buffer))
       return Err;
 
-    MetadataList.assignValue(GET_OR_DISTINCT(DIExpression, (Context, Elts)),
-                             NextMetadataNo);
+    SmallVector<Metadata *, 4> RawOperands;
+    RawOperands.reserve(RawOperandIDs.size());
+    for (uint64_t ID : RawOperandIDs)
+      RawOperands.push_back(getMDOrNull(ID));
+    MetadataList.assignValue(
+        GET_OR_DISTINCT(DIExpression, (Context, Elts, RawOperands)),
+        NextMetadataNo);
     NextMetadataNo++;
     break;
   }

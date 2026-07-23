@@ -1,0 +1,15 @@
+# RUN: not llc -run-pass=none -o /dev/null %s 2>&1 | FileCheck %s
+
+# Diagnose an operand that refers to an undefined machine metadata ID.
+
+--- |
+  define i32 @f() {
+    ret i32 0
+  }
+...
+---
+name: f
+machineMetadataNodes:
+  - '!0 = !DIExpression(DW_OP_lit0, operands: {!1})'
+...
+# CHECK: [[@LINE-2]]:50: use of undefined metadata '!1'

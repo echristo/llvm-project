@@ -1913,14 +1913,10 @@ void GlobalObject::copyMetadata(const GlobalObject *Other, unsigned Offset) {
         GV = GVE->getVariable();
         E = GVE->getExpression();
       }
-      ArrayRef<uint64_t> OrigElements;
       if (E)
-        OrigElements = E->getElements();
-      std::vector<uint64_t> Elements(OrigElements.size() + 2);
-      Elements[0] = dwarf::DW_OP_plus_uconst;
-      Elements[1] = Offset;
-      llvm::copy(OrigElements, Elements.begin() + 2);
-      E = DIExpression::get(getContext(), Elements);
+        E = DIExpression::prepend(E, /*Flags=*/0, Offset);
+      else
+        E = DIExpression::get(getContext(), {dwarf::DW_OP_plus_uconst, Offset});
       Attachment = DIGlobalVariableExpression::get(getContext(), GV, E);
     }
     addMetadata(MD.first, *Attachment);

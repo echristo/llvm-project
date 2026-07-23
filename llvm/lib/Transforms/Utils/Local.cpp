@@ -1668,8 +1668,8 @@ static void insertDbgValueOrDbgVariableRecord(DIBuilder &Builder, Value *DV,
 
 static DIExpression *dropInitialDeref(const DIExpression *DIExpr) {
   int NumEltDropped = DIExpr->getElements()[0] == dwarf::DW_OP_LLVM_arg ? 3 : 1;
-  return DIExpression::get(DIExpr->getContext(),
-                           DIExpr->getElements().drop_front(NumEltDropped));
+  return DIExpr->getWithReplacedElements(
+      DIExpr->getElements().drop_front(NumEltDropped));
 }
 
 void llvm::ConvertDebugDeclareToDebugValue(DbgVariableRecord *DVR,

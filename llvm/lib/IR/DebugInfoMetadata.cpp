@@ -1700,9 +1700,63 @@ DILabel *DILabel::getImpl(LLVMContext &Context, Metadata *Scope, MDString *Name,
 DIExpression *DIExpression::getImpl(LLVMContext &Context,
                                     ArrayRef<uint64_t> Elements,
                                     StorageType Storage, bool ShouldCreate) {
-  DEFINE_GETIMPL_LOOKUP(DIExpression, (Elements));
-  DEFINE_GETIMPL_STORE_NO_OPS(DIExpression, (Elements));
+  return getImpl(Context, Elements, {}, Storage, ShouldCreate);
 }
+
+DIExpression *DIExpression::getImpl(LLVMContext &Context,
+                                    ArrayRef<uint64_t> Elements,
+                                    ArrayRef<Metadata *> RawOperands,
+                                    StorageType Storage, bool ShouldCreate) {
+  DEFINE_GETIMPL_LOOKUP(DIExpression, (Elements, RawOperands));
+  return storeImpl(new (RawOperands.size(), Storage)
+                       DIExpression(Context, Storage, Elements, RawOperands),
+                   Storage, Context.pImpl->DIExpressions);
+}
+
+TempDIExpression DIExpression::cloneImpl() const {
+  SmallVector<Metadata *, 4> RawOperands(op_begin(), op_end());
+  return getTemporary(getContext(), getElements(), RawOperands);
+}
+
+#ifndef NDEBUG
+// Count metadata operands required by Elements; nullopt if malformed.
+static std::optional<size_t>
+getRequiredMetadataOperands(ArrayRef<uint64_t> Elements) {
+  size_t NumMetadataOperands = 0;
+  for (const uint64_t *I = Elements.begin(), *E = Elements.end(); I != E;) {
+    DIExpression::ExprOperand Op(I);
+    const unsigned Size = Op.getSize();
+    if (static_cast<size_t>(E - I) < Size)
+      return std::nullopt;
+    NumMetadataOperands += Op.getNumMetadataOperands();
+    I += Size;
+  }
+  return NumMetadataOperands;
+}
+#endif
+
+static void assertUsesNoMetadataOperands(ArrayRef<uint64_t> Elements) {
+#ifndef NDEBUG
+  std::optional<size_t> NumMetadataOperands =
+      getRequiredMetadataOperands(Elements);
+  assert(NumMetadataOperands && *NumMetadataOperands == 0 &&
+         "operations must not use metadata operands");
+#endif
+}
+
+DIExpression *
+DIExpression::getWithReplacedElements(ArrayRef<uint64_t> Elements) const {
+#ifndef NDEBUG
+  std::optional<size_t> NumMetadataOperands =
+      getRequiredMetadataOperands(Elements);
+  assert(NumMetadataOperands && *NumMetadataOperands == getNumOperands() &&
+         "replacement operations do not account for metadata operands");
+#endif
+
+  SmallVector<Metadata *, 4> RawOperands(op_begin(), op_end());
+  return get(getContext(), Elements, RawOperands);
+}
+
 bool DIExpression::isEntryValue() const {
   if (auto singleLocElts = getSingleLocationExpressionElements()) {
     return singleLocElts->size() > 0 &&
@@ -1757,16 +1811,44 @@ unsigned DIExpression::ExprOperand::getSize() const {
   }
 }
 
+unsigned DIExpression::ExprOperand::getNumMetadataOperands() const {
+  // Keep metadata arity here beside the integer arity in getSize().
+  // Add a case here when an operation consumes metadata operands.
+  return 0;
+}
+
 bool DIExpression::isValid() const {
-  for (auto I = expr_op_begin(), E = expr_op_end(); I != E; ++I) {
-    // Check that there's space for the operand.
-    if (I->get() + I->getSize() > E->get())
+  ArrayRef<uint64_t> ElementRange = getElements();
+  const uint64_t *Begin = ElementRange.begin();
+  const uint64_t *End = ElementRange.end();
+  size_t NumMetadataOperands = 0;
+  const size_t NumRawOperands = getNumOperands();
+
+  // Register and entry-value operations historically determine validity
+  // without interpreting the remaining operations. Continue decoding such a
+  // suffix to check its bounds and metadata arity.
+  bool CheckOperation = true;
+  for (const uint64_t *I = Begin; I != End;) {
+    ExprOperand Operand(I);
+    const unsigned Size = Operand.getSize();
+    if (static_cast<size_t>(End - I) < Size)
+      return false;
+    NumMetadataOperands += Operand.getNumMetadataOperands();
+    if (NumMetadataOperands > NumRawOperands)
       return false;
 
-    uint64_t Op = I->getOp();
+    if (!CheckOperation) {
+      I += Size;
+      continue;
+    }
+
+    uint64_t Op = Operand.getOp();
     if ((Op >= dwarf::DW_OP_reg0 && Op <= dwarf::DW_OP_reg31) ||
-        (Op >= dwarf::DW_OP_breg0 && Op <= dwarf::DW_OP_breg31))
-      return true;
+        (Op >= dwarf::DW_OP_breg0 && Op <= dwarf::DW_OP_breg31)) {
+      CheckOperation = false;
+      I += Size;
+      continue;
+    }
 
     // Check that the operand is valid.
     switch (Op) {
@@ -1774,13 +1856,14 @@ bool DIExpression::isValid() const {
       return false;
     case dwarf::DW_OP_LLVM_fragment:
       // A fragment operator must appear at the end.
-      return I->get() + I->getSize() == E->get();
+      if (I + Size != End)
+        return false;
+      break;
     case dwarf::DW_OP_stack_value: {
       // Must be the last one or followed by a DW_OP_LLVM_fragment.
-      if (I->get() + I->getSize() == E->get())
+      if (I + Size == End)
         break;
-      auto J = I;
-      if ((++J)->getOp() != dwarf::DW_OP_LLVM_fragment)
+      if (ExprOperand(I + Size).getOp() != dwarf::DW_OP_LLVM_fragment)
         return false;
       break;
     }
@@ -1792,7 +1875,7 @@ bool DIExpression::isValid() const {
       // DW_LLVM_OP_implicit_location as a placeholder for the location this
       // DIExpression is attached to, or else pass the number of implicit stack
       // elements into isValid.
-      if (getNumElements() == 1)
+      if (ElementRange.size() == 1)
         return false;
       break;
     }
@@ -1802,10 +1885,14 @@ bool DIExpression::isValid() const {
       // currently only be 1, because we support only entry values of a simple
       // register location. One reason for this is that we currently can't
       // calculate the size of the resulting DWARF block for other expressions.
-      auto FirstOp = expr_op_begin();
-      if (FirstOp->getOp() == dwarf::DW_OP_LLVM_arg && FirstOp->getArg(0) == 0)
-        ++FirstOp;
-      return I->get() == FirstOp->get() && I->getArg(0) == 1;
+      const uint64_t *FirstOp = Begin;
+      ExprOperand First(FirstOp);
+      if (First.getOp() == dwarf::DW_OP_LLVM_arg && First.getArg(0) == 0)
+        FirstOp += First.getSize();
+      if (I != FirstOp || Operand.getArg(0) != 1)
+        return false;
+      CheckOperation = false;
+      break;
     }
     case dwarf::DW_OP_LLVM_implicit_pointer:
     case dwarf::DW_OP_LLVM_convert:
@@ -1848,7 +1935,12 @@ bool DIExpression::isValid() const {
     case dwarf::DW_OP_abs:
       break;
     }
+    I += Size;
   }
+
+  if (NumMetadataOperands != NumRawOperands)
+    return false;
+
   return true;
 }
 
@@ -1938,6 +2030,7 @@ DIExpression::convertToUndefExpression(const DIExpression *Expr) {
     UndefOps.append({dwarf::DW_OP_LLVM_fragment, FragmentInfo->OffsetInBits,
                      FragmentInfo->SizeInBits});
   }
+  // The replacement has no operation that can consume metadata operands.
   return DIExpression::get(Expr->getContext(), UndefOps);
 }
 
@@ -1951,7 +2044,7 @@ DIExpression::convertToVariadicExpression(const DIExpression *Expr) {
   NewOps.reserve(Expr->getNumElements() + 2);
   NewOps.append({dwarf::DW_OP_LLVM_arg, 0});
   NewOps.append(Expr->elements_begin(), Expr->elements_end());
-  return DIExpression::get(Expr->getContext(), NewOps);
+  return Expr->getWithReplacedElements(NewOps);
 }
 
 std::optional<const DIExpression *>
@@ -1960,7 +2053,7 @@ DIExpression::convertToNonVariadicExpression(const DIExpression *Expr) {
     return std::nullopt;
 
   if (auto Elts = Expr->getSingleLocationExpressionElements())
-    return DIExpression::get(Expr->getContext(), *Elts);
+    return Expr->getWithReplacedElements(*Elts);
 
   return std::nullopt;
 }
@@ -2004,7 +2097,14 @@ bool DIExpression::isEqualExpression(const DIExpression *FirstExpr,
   SmallVector<uint64_t> SecondOps;
   DIExpression::canonicalizeExpressionOps(SecondOps, SecondExpr,
                                           SecondIndirect);
-  return FirstOps == SecondOps;
+  // Canonicalization only changes operations with no metadata operands, so it
+  // does not change the raw operand order.
+  return FirstOps == SecondOps &&
+         std::equal(FirstExpr->op_begin(), FirstExpr->op_end(),
+                    SecondExpr->op_begin(), SecondExpr->op_end(),
+                    [](const MDOperand &LHS, const MDOperand &RHS) {
+                      return LHS.get() == RHS.get();
+                    });
 }
 
 std::optional<DIExpression::FragmentInfo>
@@ -2159,27 +2259,34 @@ bool DIExpression::hasAllLocationOps(unsigned N) const {
 
 const DIExpression *DIExpression::extractAddressClass(const DIExpression *Expr,
                                                       unsigned &AddrClass) {
-  // FIXME: This seems fragile. Nothing that verifies that these elements
-  // actually map to ops and not operands.
   auto SingleLocEltsOpt = Expr->getSingleLocationExpressionElements();
   if (!SingleLocEltsOpt)
     return nullptr;
   auto SingleLocElts = *SingleLocEltsOpt;
 
-  const unsigned PatternSize = 4;
-  if (SingleLocElts.size() >= PatternSize &&
-      SingleLocElts[PatternSize - 4] == dwarf::DW_OP_constu &&
-      SingleLocElts[PatternSize - 2] == dwarf::DW_OP_swap &&
-      SingleLocElts[PatternSize - 1] == dwarf::DW_OP_xderef) {
-    AddrClass = SingleLocElts[PatternSize - 3];
-
-    if (SingleLocElts.size() == PatternSize)
-      return nullptr;
-    return DIExpression::get(
-        Expr->getContext(),
-        ArrayRef(&*SingleLocElts.begin(), SingleLocElts.size() - PatternSize));
+  std::optional<ExprOperand> First;
+  std::optional<ExprOperand> Second;
+  std::optional<ExprOperand> Third;
+  for (auto I = expr_op_iterator(SingleLocElts.begin()),
+            E = expr_op_iterator(SingleLocElts.end());
+       I != E; ++I) {
+    ExprOperand Op = *I;
+    First = Second;
+    Second = Third;
+    Third = Op;
   }
-  return Expr;
+
+  if (!First || First->getOp() != dwarf::DW_OP_constu ||
+      Second->getOp() != dwarf::DW_OP_swap ||
+      Third->getOp() != dwarf::DW_OP_xderef)
+    return Expr;
+
+  AddrClass = First->getArg(0);
+  ArrayRef<uint64_t> RemainingOps(SingleLocElts.begin(),
+                                  First->get() - SingleLocElts.begin());
+  if (RemainingOps.empty())
+    return nullptr;
+  return Expr->getWithReplacedElements(RemainingOps);
 }
 
 DIExpression *DIExpression::prepend(const DIExpression *Expr, uint8_t Flags,
@@ -2202,6 +2309,7 @@ DIExpression *DIExpression::appendOpsToArg(const DIExpression *Expr,
                                            ArrayRef<uint64_t> Ops,
                                            unsigned ArgNo, bool StackValue) {
   assert(Expr && "Can't add ops to this expression");
+  assertUsesNoMetadataOperands(Ops);
 
   // Handle non-variadic intrinsics by prepending the opcodes.
   if (!any_of(Expr->expr_ops(),
@@ -2230,7 +2338,7 @@ DIExpression *DIExpression::appendOpsToArg(const DIExpression *Expr,
   if (StackValue)
     NewOps.push_back(dwarf::DW_OP_stack_value);
 
-  return DIExpression::get(Expr->getContext(), NewOps);
+  return Expr->getWithReplacedElements(NewOps);
 }
 
 DIExpression *DIExpression::replaceArg(const DIExpression *Expr,
@@ -2252,13 +2360,14 @@ DIExpression *DIExpression::replaceArg(const DIExpression *Expr,
       --Arg;
     NewOps.push_back(Arg);
   }
-  return DIExpression::get(Expr->getContext(), NewOps);
+  return Expr->getWithReplacedElements(NewOps);
 }
 
 DIExpression *DIExpression::prependOpcodes(const DIExpression *Expr,
                                            SmallVectorImpl<uint64_t> &Ops,
                                            bool StackValue, bool EntryValue) {
   assert(Expr && "Can't prepend ops to this expression");
+  assertUsesNoMetadataOperands(Ops);
 
   if (EntryValue) {
     Ops.push_back(dwarf::DW_OP_LLVM_entry_value);
@@ -2285,19 +2394,19 @@ DIExpression *DIExpression::prependOpcodes(const DIExpression *Expr,
   }
   if (StackValue)
     Ops.push_back(dwarf::DW_OP_stack_value);
-  return DIExpression::get(Expr->getContext(), Ops);
+  return Expr->getWithReplacedElements(Ops);
 }
 
-DIExpression *DIExpression::append(const DIExpression *Expr,
-                                   ArrayRef<uint64_t> Ops) {
-  assert(Expr && !Ops.empty() && "Can't append ops to this expression");
-
-  // Copy Expr's current op list.
+static DIExpression *appendOperations(const DIExpression *Expr,
+                                      ArrayRef<uint64_t> Ops,
+                                      ArrayRef<MDOperand> RawOperands) {
   SmallVector<uint64_t, 16> NewOps;
   for (auto Op : Expr->expr_ops()) {
     // Append new opcodes before DW_OP_{stack_value, LLVM_fragment}.
     if (Op.getOp() == dwarf::DW_OP_stack_value ||
         Op.getOp() == dwarf::DW_OP_LLVM_fragment) {
+      assert(Op.getNumMetadataOperands() == 0 &&
+             "trailing operation must not use metadata operands");
       NewOps.append(Ops.begin(), Ops.end());
 
       // Ensure that the new opcodes are only appended once.
@@ -2306,15 +2415,57 @@ DIExpression *DIExpression::append(const DIExpression *Expr,
     Op.appendToVector(NewOps);
   }
   NewOps.append(Ops.begin(), Ops.end());
-  auto *result =
-      DIExpression::get(Expr->getContext(), NewOps)->foldConstantMath();
+
+  // New operations are inserted after every metadata-using operation in Expr,
+  // so concatenating the operand lists preserves their operation order.
+  SmallVector<Metadata *, 4> NewRawOperands(Expr->op_begin(), Expr->op_end());
+  for (const MDOperand &Operand : RawOperands)
+    NewRawOperands.push_back(Operand.get());
+  auto *result = DIExpression::get(Expr->getContext(), NewOps, NewRawOperands)
+                     ->foldConstantMath();
   assert(result->isValid() && "concatenated expression is not valid");
   return result;
+}
+
+DIExpression *DIExpression::append(const DIExpression *Expr,
+                                   ArrayRef<uint64_t> Ops) {
+  assert(Expr && !Ops.empty() && "Can't append ops to this expression");
+  assertUsesNoMetadataOperands(Ops);
+  return appendOperations(Expr, Ops, {});
+}
+
+DIExpression *DIExpression::append(const DIExpression *Expr,
+                                   const DIExpression *Addition) {
+  assert(Expr && Addition && "Can't append this expression");
+  if (!Addition->getNumElements()) {
+    assert(!Addition->getNumOperands() &&
+           "empty expression cannot use metadata operands");
+    return const_cast<DIExpression *>(Expr);
+  }
+
+  if (!Expr->isImplicit() || !Addition->isImplicit())
+    return appendOperations(Expr, Addition->getElements(),
+                            Addition->operands());
+
+  SmallVector<uint64_t> Elements;
+  for (ExprOperand Op : Addition->expr_ops()) {
+    if (Op.getOp() == dwarf::DW_OP_stack_value) {
+      assert(Op.getNumMetadataOperands() == 0 &&
+             "stack value must not use metadata operands");
+      continue;
+    }
+    Op.appendToVector(Elements);
+  }
+  if (Elements.empty())
+    return const_cast<DIExpression *>(Expr);
+
+  return appendOperations(Expr, Elements, Addition->operands());
 }
 
 DIExpression *DIExpression::appendToStack(const DIExpression *Expr,
                                           ArrayRef<uint64_t> Ops) {
   assert(Expr && !Ops.empty() && "Can't append ops to this expression");
+  assertUsesNoMetadataOperands(Ops);
   assert(std::none_of(expr_op_iterator(Ops.begin()),
                       expr_op_iterator(Ops.end()),
                       [](auto Op) {
@@ -2435,7 +2586,7 @@ std::optional<DIExpression *> DIExpression::createFragmentExpression(
     Ops.push_back(OffsetInBits);
     Ops.push_back(SizeInBits);
   }
-  return DIExpression::get(Expr->getContext(), Ops);
+  return Expr->getWithReplacedElements(Ops);
 }
 
 /// See declaration for more info.
@@ -2542,8 +2693,7 @@ DIExpression::constantFold(const ConstantInt *CI) {
   }
   if (!Changed)
     return {this, CI};
-  return {DIExpression::get(getContext(), Ops),
-          ConstantInt::get(getContext(), NewInt)};
+  return {getWithReplacedElements(Ops), ConstantInt::get(getContext(), NewInt)};
 }
 
 uint64_t DIExpression::getNumLocationOperands() const {

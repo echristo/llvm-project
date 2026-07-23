@@ -3775,7 +3775,7 @@ void IRTranslator::translateDbgValueRecord(Value *V, bool HasArgList,
     // may be clobbered.
     auto ExprOperands = Expression->getElements();
     auto *ExprDerefRemoved =
-        DIExpression::get(AI->getContext(), ExprOperands.drop_front());
+        Expression->getWithReplacedElements(ExprOperands.drop_front());
     MIRBuilder.buildFIDbgValue(getOrCreateFrameIndex(*AI), Variable,
                                ExprDerefRemoved);
     return;

@@ -13,4 +13,4 @@ machineMetadataNodes:
   - '!9 = distinct !{!9, !7, !"Dst"}'
   - '!9 = distinct !{!9, !7, !"Src"}'
 ...
-# CHECK: [[@LINE-2]]:37: Metadata id is already used
+# CHECK: [[@LINE-2]]:7: Metadata id is already used

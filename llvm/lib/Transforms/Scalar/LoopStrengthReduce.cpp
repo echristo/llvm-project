@@ -6848,32 +6848,25 @@ static unsigned numLLVMArgOps(SmallVectorImpl<uint64_t> &Expr) {
   return Count;
 }
 
-/// Overwrites DVI with the location and Ops as the DIExpression. This will
-/// create an invalid expression if Ops has any dwarf::DW_OP_llvm_arg operands,
-/// because a DIArglist is not created for the first argument of the dbg.value.
+/// Overwrite DVI with one location and its expression.
 template <typename T>
 static void updateDVIWithLocation(T &DbgVal, Value *Location,
-                                  SmallVectorImpl<uint64_t> &Ops) {
-  assert(numLLVMArgOps(Ops) == 0 && "Expected expression that does not "
-                                    "contain any DW_OP_llvm_arg operands.");
+                                  DIExpression *Expr) {
   DbgVal.setRawLocation(ValueAsMetadata::get(Location));
-  DbgVal.setExpression(DIExpression::get(DbgVal.getContext(), Ops));
+  DbgVal.setExpression(Expr);
 }
 
 /// Overwrite DVI with locations placed into a DIArglist.
 template <typename T>
 static void updateDVIWithLocations(T &DbgVal,
                                    SmallVectorImpl<Value *> &Locations,
-                                   SmallVectorImpl<uint64_t> &Ops) {
-  assert(numLLVMArgOps(Ops) != 0 &&
-         "Expected expression that references DIArglist locations using "
-         "DW_OP_llvm_arg operands.");
+                                   DIExpression *Expr) {
   SmallVector<ValueAsMetadata *, 3> MetadataLocs;
   for (Value *V : Locations)
     MetadataLocs.push_back(ValueAsMetadata::get(V));
   auto ValArrayRef = llvm::ArrayRef<llvm::ValueAsMetadata *>(MetadataLocs);
   DbgVal.setRawLocation(llvm::DIArgList::get(DbgVal.getContext(), ValArrayRef));
-  DbgVal.setExpression(DIExpression::get(DbgVal.getContext(), Ops));
+  DbgVal.setExpression(Expr);
 }
 
 /// Write the new expression and new location ops for the dbg.value. If possible
@@ -6888,17 +6881,20 @@ static void UpdateDbgValue(DVIRecoveryRec &DVIRec,
   unsigned NumLLVMArgs = numLLVMArgOps(NewExpr);
   if (NumLLVMArgs == 0) {
     // Location assumed to be on the stack.
-    updateDVIWithLocation(*DbgVal, NewLocationOps[0], NewExpr);
+    updateDVIWithLocation(*DbgVal, NewLocationOps[0],
+                          DVIRec.Expr->getWithReplacedElements(NewExpr));
   } else if (NumLLVMArgs == 1 && NewExpr[0] == dwarf::DW_OP_LLVM_arg) {
     // There is only a single DW_OP_llvm_arg at the start of the expression,
     // so it can be omitted along with DIArglist.
     assert(NewExpr[1] == 0 &&
            "Lone LLVM_arg in a DIExpression should refer to location-op 0.");
     llvm::SmallVector<uint64_t, 6> ShortenedOps(llvm::drop_begin(NewExpr, 2));
-    updateDVIWithLocation(*DbgVal, NewLocationOps[0], ShortenedOps);
+    updateDVIWithLocation(*DbgVal, NewLocationOps[0],
+                          DVIRec.Expr->getWithReplacedElements(ShortenedOps));
   } else {
     // Multiple DW_OP_llvm_arg, so DIArgList is strictly necessary.
-    updateDVIWithLocations(*DbgVal, NewLocationOps, NewExpr);
+    updateDVIWithLocations(*DbgVal, NewLocationOps,
+                           DVIRec.Expr->getWithReplacedElements(NewExpr));
   }
 
   // If the DIExpression was previously empty then add the stack terminator.

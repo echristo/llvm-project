@@ -375,11 +375,15 @@ enum MetadataCodes {
   METADATA_LEXICAL_BLOCK = 22,      // [distinct, scope, file, line, column]
   METADATA_LEXICAL_BLOCK_FILE = 23, //[distinct, scope, file, discriminator]
   METADATA_NAMESPACE = 24, // [distinct, scope, file, name, line, exportSymbols]
-  METADATA_TEMPLATE_TYPE = 25,   // [distinct, scope, name, type, ...]
-  METADATA_TEMPLATE_VALUE = 26,  // [distinct, scope, name, type, value, ...]
-  METADATA_GLOBAL_VAR = 27,      // [distinct, ...]
-  METADATA_LOCAL_VAR = 28,       // [distinct, ...]
-  METADATA_EXPRESSION = 29,      // [distinct, n x element]
+  METADATA_TEMPLATE_TYPE = 25,  // [distinct, scope, name, type, ...]
+  METADATA_TEMPLATE_VALUE = 26, // [distinct, scope, name, type, value, ...]
+  METADATA_GLOBAL_VAR = 27,     // [distinct, ...]
+  METADATA_LOCAL_VAR = 28,      // [distinct, ...]
+  // v0-v3: [distinct | version, n x element]
+  // v4: [distinct | version, num elements, n x element, m x metadata id]
+  // The reader accepts an empty v4 metadata ID list; the writer uses v3 in
+  // that case.
+  METADATA_EXPRESSION = 29,
   METADATA_OBJC_PROPERTY = 30,   // [distinct, name, file, line, ...]
   METADATA_IMPORTED_ENTITY = 31, // [distinct, tag, scope, entity, line, name]
   METADATA_MODULE = 32,          // [distinct, scope, name, ...]

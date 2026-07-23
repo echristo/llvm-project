@@ -949,6 +949,10 @@ and target the corresponding MLIR constructs.
 An experimental flow allows one to import a substantially limited subset of LLVM
 IR into MLIR, producing LLVM dialect operations.
 
-```
+```shell
   mlir-translate -import-llvm filename.ll
 ```
+
+The LLVM dialect's `DIExpressionAttr` stores only the integer elements of an
+LLVM `DIExpression`, not its metadata operands. The LLVM IR importer drops
+debug constructs that contain expressions with metadata operands.

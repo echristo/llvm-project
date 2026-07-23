@@ -2474,10 +2474,15 @@ void ModuleBitcodeWriter::writeDILabel(
 void ModuleBitcodeWriter::writeDIExpression(const DIExpression *N,
                                             SmallVectorImpl<uint64_t> &Record,
                                             unsigned Abbrev) {
-  Record.reserve(N->getElements().size() + 1);
-  const uint64_t Version = 3 << 1;
+  Record.reserve(N->getElements().size() + N->getNumOperands() + 2);
+  // Use version 3 for expressions without metadata operands.
+  const uint64_t Version = (N->getNumOperands() ? 4 : 3) << 1;
   Record.push_back((uint64_t)N->isDistinct() | Version);
+  if (N->getNumOperands())
+    Record.push_back(N->getElements().size());
   Record.append(N->elements_begin(), N->elements_end());
+  for (const MDOperand &Operand : N->operands())
+    Record.push_back(VE.getMetadataOrNullID(Operand.get()));
 
   Stream.EmitRecord(bitc::METADATA_EXPRESSION, Record, Abbrev);
   Record.clear();

@@ -214,6 +214,9 @@ public:
     return ArrayRef(MDs).slice(NumModuleMDs).slice(NumMDStrings);
   }
 
+  /// Get metadata emitted in function blocks.
+  ArrayRef<const Metadata *> getFunctionMetadata() const { return FunctionMDs; }
+
   const TypeList &getTypes() const { return Types; }
 
   const std::vector<const BasicBlock *> &getBasicBlocks() const {

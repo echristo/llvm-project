@@ -710,7 +710,7 @@ bool DwarfExpression::addExpression(
             emitLegacyZExt(PrevConvertOp->getArg(0));
           PrevConvertOp = std::nullopt;
         } else {
-          PrevConvertOp = Op;
+          PrevConvertOp = Op->getExprOperand();
         }
       }
       break;

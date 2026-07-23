@@ -12,6 +12,7 @@
 
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/AsmParser/LLParser.h"
+#include "llvm/AsmParser/SlotMapping.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ModuleSummaryIndex.h"
@@ -238,12 +239,30 @@ DIExpression *llvm::parseDIExpressionBodyAtBeginning(StringRef Asm,
                                                      SMDiagnostic &Err,
                                                      const Module &M,
                                                      const SlotMapping *Slots) {
+  SlotMapping EmptySlots;
+  const SlotMapping &ResolvedSlots = Slots ? *Slots : EmptySlots;
+  auto LookupMetadata = [Slots](unsigned ID) -> MDNode * {
+    if (!Slots)
+      return nullptr;
+    auto It = Slots->MetadataNodes.find(ID);
+    return It == Slots->MetadataNodes.end() ? nullptr : It->second.get();
+  };
+  return parseDIExpressionBodyAtBeginning(Asm, Read, Err, M, ResolvedSlots,
+                                          LookupMetadata,
+                                          /*IsDistinct=*/false);
+}
+
+DIExpression *llvm::parseDIExpressionBodyAtBeginning(
+    StringRef Asm, unsigned &Read, SMDiagnostic &Err, const Module &M,
+    const SlotMapping &Slots, function_ref<MDNode *(unsigned)> LookupMetadata,
+    bool IsDistinct) {
   SourceMgr SM;
   std::unique_ptr<MemoryBuffer> Buf = MemoryBuffer::getMemBuffer(Asm);
   SM.AddNewSourceBuffer(std::move(Buf), SMLoc());
   MDNode *MD;
   if (LLParser(Asm, SM, Err, const_cast<Module *>(&M), nullptr, M.getContext())
-          .parseDIExpressionBodyAtBeginning(MD, Read, Slots))
+          .parseDIExpressionBodyAtBeginning(MD, Read, &Slots, LookupMetadata,
+                                            IsDistinct))
     return nullptr;
   return dyn_cast<DIExpression>(MD);
 }

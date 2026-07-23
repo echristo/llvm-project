@@ -126,31 +126,30 @@ canonicalizeDwarfOperations(ArrayRef<uint64_t> WorkingOps) {
     if (OpRaw >= dwarf::DW_OP_lit0 && OpRaw <= dwarf::DW_OP_lit31) {
       ResultOps.push_back(dwarf::DW_OP_constu);
       ResultOps.push_back(OpRaw - dwarf::DW_OP_lit0);
-      consumeOneOperator(Cursor, Loc, *Cursor.peek());
+      consumeOneOperator(Cursor, Loc, Op->getExprOperand());
       continue;
     }
     if (OpRaw == dwarf::DW_OP_plus_uconst) {
       ResultOps.push_back(dwarf::DW_OP_constu);
       ResultOps.push_back(Op->getArg(0));
       ResultOps.push_back(dwarf::DW_OP_plus);
-      consumeOneOperator(Cursor, Loc, *Cursor.peek());
+      consumeOneOperator(Cursor, Loc, Op->getExprOperand());
       continue;
     }
     uint64_t PrevLoc = Loc;
-    consumeOneOperator(Cursor, Loc, *Cursor.peek());
+    consumeOneOperator(Cursor, Loc, Op->getExprOperand());
     ResultOps.append(WorkingOps.begin() + PrevLoc, WorkingOps.begin() + Loc);
   }
   return ResultOps;
 }
 
-/// This function will convert:
+/// Append an optimized form of \p WorkingOps to \p ResultOps, converting:
 /// 1. DW_OP_constu <const-val> DW_OP_plus to DW_OP_plus_uconst
 /// 2. DW_OP_constu, 0 to DW_OP_lit0
-static SmallVector<uint64_t>
-optimizeDwarfOperations(ArrayRef<uint64_t> WorkingOps) {
+static void optimizeDwarfOperations(ArrayRef<uint64_t> WorkingOps,
+                                    SmallVectorImpl<uint64_t> &ResultOps) {
   DIExpressionCursor Cursor(WorkingOps);
   uint64_t Loc = 0;
-  SmallVector<uint64_t> ResultOps;
   while (Loc < WorkingOps.size()) {
     auto Op1 = Cursor.peek();
     /// Expression has no operations, exit.
@@ -160,7 +159,7 @@ optimizeDwarfOperations(ArrayRef<uint64_t> WorkingOps) {
 
     if (Op1Raw == dwarf::DW_OP_constu && Op1->getArg(0) == 0) {
       ResultOps.push_back(dwarf::DW_OP_lit0);
-      consumeOneOperator(Cursor, Loc, *Cursor.peek());
+      consumeOneOperator(Cursor, Loc, Op1->getExprOperand());
       continue;
     }
 
@@ -168,7 +167,7 @@ optimizeDwarfOperations(ArrayRef<uint64_t> WorkingOps) {
     /// Expression has no more operations, copy into ResultOps and exit.
     if (!Op2) {
       uint64_t PrevLoc = Loc;
-      consumeOneOperator(Cursor, Loc, *Cursor.peek());
+      consumeOneOperator(Cursor, Loc, Op1->getExprOperand());
       ResultOps.append(WorkingOps.begin() + PrevLoc, WorkingOps.begin() + Loc);
       break;
     }
@@ -177,15 +176,14 @@ optimizeDwarfOperations(ArrayRef<uint64_t> WorkingOps) {
     if (Op1Raw == dwarf::DW_OP_constu && Op2Raw == dwarf::DW_OP_plus) {
       ResultOps.push_back(dwarf::DW_OP_plus_uconst);
       ResultOps.push_back(Op1->getArg(0));
-      consumeOneOperator(Cursor, Loc, *Cursor.peek());
-      consumeOneOperator(Cursor, Loc, *Cursor.peek());
+      consumeOneOperator(Cursor, Loc, Op1->getExprOperand());
+      consumeOneOperator(Cursor, Loc, Op2->getExprOperand());
       continue;
     }
     uint64_t PrevLoc = Loc;
-    consumeOneOperator(Cursor, Loc, *Cursor.peek());
+    consumeOneOperator(Cursor, Loc, Op1->getExprOperand());
     ResultOps.append(WorkingOps.begin() + PrevLoc, WorkingOps.begin() + Loc);
   }
-  return ResultOps;
 }
 
 /// {DW_OP_constu, 0, DW_OP_[plus, minus, shl, shr]} -> {}
@@ -285,8 +283,12 @@ static bool tryFoldCommutativeMathWithArgInBetween(
   return true;
 }
 
-DIExpression *DIExpression::foldConstantMath() {
-
+/// Fold constant math in an integer-only operation stream and append the
+/// result to \p FoldedOps.
+///
+/// \pre Every operation in \p Elements has zero metadata arity.
+static void foldConstantMathOperations(ArrayRef<uint64_t> Elements,
+                                       SmallVectorImpl<uint64_t> &FoldedOps) {
   SmallVector<uint64_t, 8> WorkingOps(Elements.begin(), Elements.end());
   uint64_t Loc = 0;
   SmallVector<uint64_t> ResultOps = canonicalizeDwarfOperations(WorkingOps);
@@ -303,22 +305,22 @@ DIExpression *DIExpression::foldConstantMath() {
     if (!Op)
       break;
 
-    auto Const1 = isConstantVal(*Op);
+    auto Const1 = isConstantVal(Op->getExprOperand());
 
     if (!Const1) {
       // Early exit, all of the following patterns start with a constant value.
-      consumeOneOperator(Cursor, Loc, *Op);
+      consumeOneOperator(Cursor, Loc, Op->getExprOperand());
       continue;
     }
 
-    Ops.push_back(*Op);
+    Ops.push_back(Op->getExprOperand());
 
     Op = Cursor.peekNext();
     // All following patterns require at least 2 Operations, exit.
     if (!Op)
       break;
 
-    Ops.push_back(*Op);
+    Ops.push_back(Op->getExprOperand());
 
     // Try to fold a constant no-op, such as {+ 0}
     if (tryFoldNoOpMath(*Const1, Ops, Loc, Cursor, ResultOps))
@@ -331,7 +333,7 @@ DIExpression *DIExpression::foldConstantMath() {
       continue;
     }
 
-    Ops.push_back(*Op);
+    Ops.push_back(Op->getExprOperand());
 
     // Try to fold a pattern of two constants such as {C1 + C2}.
     if (tryFoldConstants(*Const1, Ops, Loc, Cursor, ResultOps))
@@ -344,7 +346,7 @@ DIExpression *DIExpression::foldConstantMath() {
       continue;
     }
 
-    Ops.push_back(*Op);
+    Ops.push_back(Op->getExprOperand());
 
     // Try to fold commutative constant math, such as {C1 + C2 +}.
     if (tryFoldCommutativeMath(*Const1, Ops, Loc, Cursor, ResultOps))
@@ -356,14 +358,14 @@ DIExpression *DIExpression::foldConstantMath() {
       continue;
     }
 
-    Ops.push_back(*Op);
+    Ops.push_back(Op->getExprOperand());
     Op = Cursor.peekNextN(5);
     if (!Op) {
       consumeOneOperator(Cursor, Loc, Ops[0]);
       continue;
     }
 
-    Ops.push_back(*Op);
+    Ops.push_back(Op->getExprOperand());
 
     // Try to fold commutative constant math with an LLVM_Arg in between, such
     // as {C1 + Arg + C2 +}.
@@ -373,8 +375,37 @@ DIExpression *DIExpression::foldConstantMath() {
 
     consumeOneOperator(Cursor, Loc, Ops[0]);
   }
-  ResultOps = optimizeDwarfOperations(ResultOps);
-  auto *Result = DIExpression::get(getContext(), ResultOps);
-  assert(Result->isValid() && "concatenated expression is not valid");
+  optimizeDwarfOperations(ResultOps, FoldedOps);
+}
+
+DIExpression *DIExpression::foldConstantMath() {
+  SmallVector<uint64_t, 8> ResultOps;
+  if (getNumOperands() == 0) {
+    foldConstantMathOperations(getElements(), ResultOps);
+  } else {
+    SmallVector<uint64_t, 8> FoldableOps;
+    auto FlushFoldableOps = [&] {
+      if (FoldableOps.empty())
+        return;
+      foldConstantMathOperations(FoldableOps, ResultOps);
+      FoldableOps.clear();
+    };
+
+    DIExpressionCursor Cursor(this);
+    while (std::optional<DIExpressionCursor::Operation> Op = Cursor.take()) {
+      if (Op->getNumMetadataOperands()) {
+        // Do not fold across metadata-consuming operations, and keep those
+        // operations in order so their positional operands remain associated.
+        FlushFoldableOps();
+        Op->getExprOperand().appendToVector(ResultOps);
+        continue;
+      }
+      Op->getExprOperand().appendToVector(FoldableOps);
+    }
+    FlushFoldableOps();
+  }
+
+  auto *Result = getWithReplacedElements(ResultOps);
+  assert(Result->isValid() && "folded expression is not valid");
   return Result;
 }

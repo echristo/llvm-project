@@ -1029,9 +1029,17 @@ void DwarfCompileUnit::applyConcreteDbgVariableAttributes(const Loc::MMI &MMI,
     TRI->getOffsetOpcodes(Offset, Ops);
 
     Expr = DD->adjustExpressionForTarget(Expr, TargetAddrSpace);
-    if (Expr)
-      Ops.append(Expr->elements_begin(), Expr->elements_end());
-    DIExpressionCursor Cursor(Ops);
+    DIExpressionCursor Cursor(nullptr);
+    if (Expr && Expr->getNumOperands()) {
+      // Build one expression so the cursor can keep metadata operands paired
+      // with their operations after the offset operations are prepended.
+      Expr = DIExpression::prependOpcodes(Expr, Ops);
+      Cursor = DIExpressionCursor(Expr);
+    } else {
+      if (Expr)
+        Ops.append(Expr->elements_begin(), Expr->elements_end());
+      Cursor.assignNewExpr(Ops);
+    }
     DwarfExpr.setMemoryLocationKind();
     if (const MCSymbol *FrameSymbol = Asm->getFunctionFrameSymbol())
       addOpAddress(*Loc, FrameSymbol);
@@ -1056,7 +1064,7 @@ void DwarfCompileUnit::applyConcreteDbgVariableAttributes(
   // Emit each expression as: EntryValue(Register) <other ops> <Fragment>.
   for (auto [Register, Expr] : EntryValue.EntryValues) {
     DwarfExpr.addFragmentOffset(&Expr);
-    DIExpressionCursor Cursor(Expr.getElements());
+    DIExpressionCursor Cursor(&Expr);
     DwarfExpr.beginEntryValueExpression(Cursor);
     DwarfExpr.addMachineRegExpression(
         *Asm->MF->getSubtarget().getRegisterInfo(), Cursor, Register);

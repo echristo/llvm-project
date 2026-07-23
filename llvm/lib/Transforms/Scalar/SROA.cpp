@@ -5760,7 +5760,7 @@ static DIExpression *createOrReplaceFragment(const DIExpression *Expr,
     Ops.push_back(Frag.OffsetInBits);
     Ops.push_back(Frag.SizeInBits);
   }
-  return DIExpression::get(Expr->getContext(), Ops);
+  return Expr->getWithReplacedElements(Ops);
 }
 
 /// Insert a new DbgRecord.
@@ -5934,13 +5934,14 @@ bool SROA::splitAlloca(AllocaInst &AI, AllocaSlices &AS) {
     // that come after it.
     int64_t CurrentExprOffsetInBytes = 0;
     SmallVector<uint64_t> PostOffsetOps;
-    if (!getAddressExpression(DbgVariable)
-             ->extractLeadingOffset(CurrentExprOffsetInBytes, PostOffsetOps))
+    const DIExpression *AddressExpr = getAddressExpression(DbgVariable);
+    if (!AddressExpr->extractLeadingOffset(CurrentExprOffsetInBytes,
+                                           PostOffsetOps))
       return; // Couldn't interpret this DIExpression - drop the var.
 
     // Offset defined by a DW_OP_LLVM_extract_bits_[sz]ext.
     int64_t ExtractOffsetInBits = 0;
-    for (auto Op : getAddressExpression(DbgVariable)->expr_ops()) {
+    for (auto Op : AddressExpr->expr_ops()) {
       if (Op.getOp() == dwarf::DW_OP_LLVM_extract_bits_zext ||
           Op.getOp() == dwarf::DW_OP_LLVM_extract_bits_sext) {
         ExtractOffsetInBits = Op.getArg(0);
@@ -5991,7 +5992,8 @@ bool SROA::splitAlloca(AllocaInst &AI, AllocaSlices &AS) {
       //    {Offset(OffestFromNewAllocaInBits), PostOffsetOps, NewDbgFragment}
       // Add NewDbgFragment later, because dbg.assigns don't want it in the
       // address expression but the value expression instead.
-      DIExpression *NewExpr = DIExpression::get(AI.getContext(), PostOffsetOps);
+      DIExpression *NewExpr =
+          AddressExpr->getWithReplacedElements(PostOffsetOps);
       if (OffestFromNewAllocaInBits > 0) {
         int64_t OffsetInBytes = (OffestFromNewAllocaInBits + 7) / 8;
         NewExpr = DIExpression::prepend(NewExpr, /*flags=*/0, OffsetInBytes);

@@ -64,6 +64,12 @@ enum MetadataAbbrev : unsigned {
   LastPlusOne
 };
 
+static void checkSupportedDIExpression(const DIExpression *Expression) {
+  if (Expression->getNumOperands())
+    report_fatal_error(
+        "DXIL cannot contain a DIExpression with metadata operands");
+}
+
 class DXILBitcodeWriter {
 
   /// These are manifest constants used by the bitcode writer. They do not need
@@ -174,6 +180,7 @@ public:
 
 private:
   void writeModuleVersion();
+  void checkSupportedDIExpressions();
   void writePerModuleGlobalValueSummary();
 
   void writePerModuleFunctionSummaryRecord(SmallVector<uint64_t, 64> &NameVals,
@@ -1688,6 +1695,8 @@ void DXILBitcodeWriter::writeDILocalVariable(const DILocalVariable *N,
 void DXILBitcodeWriter::writeDIExpression(const DIExpression *N,
                                           SmallVectorImpl<uint64_t> &Record,
                                           unsigned Abbrev) {
+  checkSupportedDIExpression(N);
+
   Record.reserve(N->getElements().size() + 1);
 
   Record.push_back(N->isDistinct());
@@ -1695,6 +1704,17 @@ void DXILBitcodeWriter::writeDIExpression(const DIExpression *N,
 
   Stream.EmitRecord(bitc::METADATA_EXPRESSION, Record, Abbrev);
   Record.clear();
+}
+
+void DXILBitcodeWriter::checkSupportedDIExpressions() {
+  auto CheckMetadata = [](ArrayRef<const Metadata *> Nodes) {
+    for (const Metadata *MD : Nodes)
+      if (const auto *Expression = dyn_cast<DIExpression>(MD))
+        checkSupportedDIExpression(Expression);
+  };
+
+  CheckMetadata(VE.getNonMDStrings());
+  CheckMetadata(VE.getFunctionMetadata());
 }
 
 void DXILBitcodeWriter::writeDIObjCProperty(const DIObjCProperty *N,
@@ -2915,6 +2935,10 @@ void DXILBitcodeWriter::writeModuleVersion() {
 
 /// WriteModule - Emit the specified module to the bitstream.
 void DXILBitcodeWriter::write() {
+  // Diagnose unsupported expressions before emitting any metadata. Include
+  // function-local metadata, which is otherwise incorporated during emission.
+  checkSupportedDIExpressions();
+
   // The identification block is new since llvm-3.7, but the old bitcode reader
   // will skip it.
   // writeIdentificationBlock(Stream);

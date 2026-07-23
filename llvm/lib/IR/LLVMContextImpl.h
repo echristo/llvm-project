@@ -1336,15 +1336,50 @@ template <> struct MDNodeKeyImpl<DILabel> {
 
 template <> struct MDNodeKeyImpl<DIExpression> {
   ArrayRef<uint64_t> Elements;
+  // Lookup keys use RawOperands; keys for resident nodes use Operands. Only
+  // one range can be nonempty.
+  ArrayRef<Metadata *> RawOperands;
+  ArrayRef<MDOperand> Operands;
 
-  MDNodeKeyImpl(ArrayRef<uint64_t> Elements) : Elements(Elements) {}
-  MDNodeKeyImpl(const DIExpression *N) : Elements(N->getElements()) {}
+  MDNodeKeyImpl(ArrayRef<uint64_t> Elements,
+                ArrayRef<Metadata *> RawOperands = {})
+      : Elements(Elements), RawOperands(RawOperands) {}
+  MDNodeKeyImpl(const DIExpression *N)
+      : Elements(N->getElements()), Operands(N->operands()) {}
 
   bool isKeyOf(const DIExpression *RHS) const {
-    return Elements == RHS->getElements();
+    if (Elements != RHS->getElements())
+      return false;
+
+    assert((RawOperands.empty() || Operands.empty()) &&
+           "Two sets of operands?");
+    if (!RawOperands.empty()) {
+      if (RawOperands.size() != RHS->getNumOperands())
+        return false;
+      return std::equal(
+          RawOperands.begin(), RawOperands.end(), RHS->op_begin(),
+          [](Metadata *LHS, const MDOperand &RHS) { return LHS == RHS.get(); });
+    }
+
+    if (Operands.size() != RHS->getNumOperands())
+      return false;
+    return std::equal(Operands.begin(), Operands.end(), RHS->op_begin(),
+                      [](const MDOperand &LHS, const MDOperand &RHS) {
+                        return LHS.get() == RHS.get();
+                      });
   }
 
-  unsigned getHashValue() const { return hash_combine_range(Elements); }
+  unsigned getHashValue() const {
+    unsigned ElementsHash = hash_combine_range(Elements);
+    if (RawOperands.empty() && Operands.empty())
+      return ElementsHash;
+    if (!RawOperands.empty())
+      return hash_combine(ElementsHash, hash_combine_range(RawOperands));
+    return hash_combine(
+        ElementsHash,
+        hash_combine_range(map_range(
+            Operands, [](const MDOperand &Operand) { return Operand.get(); })));
+  }
 };
 
 template <> struct MDNodeKeyImpl<DIGlobalVariableExpression> {

@@ -1237,6 +1237,13 @@ bool MIRParserImpl::parseMachineMetadata(PerFunctionMIParsingState &PFS,
 bool MIRParserImpl::parseMachineMetadataNodes(
     PerFunctionMIParsingState &PFS, MachineFunction &MF,
     const yaml::MachineFunction &YMF) {
+  // Predeclare all IDs so the second pass can resolve forward references and
+  // cycles.
+  for (const auto &MDS : YMF.MachineMetadataNodes) {
+    SMDiagnostic Error;
+    if (llvm::predeclareMachineMetadata(PFS, MDS.Value, MDS.SourceRange, Error))
+      return error(Error, MDS.SourceRange);
+  }
   for (const auto &MDS : YMF.MachineMetadataNodes) {
     if (parseMachineMetadata(PFS, MDS))
       return true;

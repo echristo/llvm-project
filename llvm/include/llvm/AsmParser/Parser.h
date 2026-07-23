@@ -25,6 +25,7 @@ namespace llvm {
 class Constant;
 class DIExpression;
 class LLVMContext;
+class MDNode;
 class MemoryBufferRef;
 class Module;
 class ModuleSummaryIndex;
@@ -206,10 +207,24 @@ LLVM_ABI Type *parseTypeAtBeginning(StringRef Asm, unsigned &Read,
                                     SMDiagnostic &Err, const Module &M,
                                     const SlotMapping *Slots = nullptr);
 
+/// Parse a string \p Asm that starts with a DIExpression body, such as
+/// `(DW_OP_deref)`. \p Read receives the number of consumed characters.
+///
+/// \p Slots resolves metadata, global, and type references. Every referenced
+/// slot must already be present in the mapping. Returns the expression on
+/// success. Returns null and populates \p Err on an error.
 LLVM_ABI DIExpression *
 parseDIExpressionBodyAtBeginning(StringRef Asm, unsigned &Read,
                                  SMDiagnostic &Err, const Module &M,
                                  const SlotMapping *Slots);
+
+/// Parse a DIExpression body. \p LookupMetadata resolves numbered metadata
+/// operands; returning null reports an undefined ID. \p IsDistinct selects
+/// distinct storage. Other parameters behave as in the SlotMapping overload.
+LLVM_ABI DIExpression *parseDIExpressionBodyAtBeginning(
+    StringRef Asm, unsigned &Read, SMDiagnostic &Err, const Module &M,
+    const SlotMapping &Slots, function_ref<MDNode *(unsigned)> LookupMetadata,
+    bool IsDistinct);
 
 } // End llvm namespace
 

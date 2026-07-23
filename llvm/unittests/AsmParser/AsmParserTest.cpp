@@ -11,6 +11,7 @@
 #include "llvm/AsmParser/AsmParserContext.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/AsmParser/SlotMapping.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugInfoMetadata.h"
@@ -561,7 +562,61 @@ TEST(AsmParserTest, DIExpressionBodyAtBeginningWithSlotMappingParsing) {
   ASSERT_FALSE(Expr);
   ASSERT_EQ(Error.getMessage(), "expected '(' here");
 
+  Error = {};
+  Expr = parseDIExpressionBodyAtBeginning("(operands: {!0})", Read, Error, M,
+                                          &Mapping);
+  ASSERT_FALSE(Expr);
+  ASSERT_EQ(Error.getMessage(), "use of undefined metadata '!0'");
+
+  Error = {};
+  Expr = parseDIExpressionBodyAtBeginning(
+      "(operands: {!0})", Read, Error, M, Mapping,
+      function_ref<MDNode *(unsigned)>(), /*IsDistinct=*/false);
+  ASSERT_FALSE(Expr);
+  ASSERT_EQ(Error.getMessage(), "use of undefined metadata '!0'");
+
   ASSERT_EQ(Mapping.MetadataNodes.size(), 0u);
+}
+
+// DW_OP_lit0 does not use metadata operands, so this is not a valid
+// DIExpression and cannot be used to produce DWARF. It only exercises the
+// generic textual representation.
+TEST(AsmParserTest, DIExpressionMetadataOperandsRoundTrip) {
+  StringRef Source = R"(
+!expressions = !{!0}
+!0 = !DIExpression(DW_OP_lit0, operands: {!1, null, i32 7, !1})
+!1 = !{!"target"}
+)";
+  LLVMContext Context;
+  SMDiagnostic Error;
+  auto M = parseAssemblyString(Source, Error, Context);
+  ASSERT_NE(nullptr, M);
+
+  auto CheckExpression = [](Module &M) {
+    NamedMDNode *Named = M.getNamedMetadata("expressions");
+    ASSERT_NE(nullptr, Named);
+    ASSERT_EQ(1u, Named->getNumOperands());
+    auto *Expression = cast<DIExpression>(Named->getOperand(0));
+    EXPECT_EQ(ArrayRef<uint64_t>{dwarf::DW_OP_lit0}, Expression->getElements());
+    ASSERT_EQ(4u, Expression->getNumOperands());
+    EXPECT_EQ(Expression->getOperand(0), Expression->getOperand(3));
+    EXPECT_EQ(nullptr, Expression->getOperand(1));
+    auto *Value = mdconst::dyn_extract<ConstantInt>(Expression->getOperand(2));
+    ASSERT_NE(nullptr, Value);
+    EXPECT_EQ(7u, Value->getZExtValue());
+  };
+  CheckExpression(*M);
+
+  std::string Printed;
+  raw_string_ostream OS(Printed);
+  M->print(OS, nullptr);
+
+  LLVMContext RoundTripContext;
+  SMDiagnostic RoundTripError;
+  auto RoundTrip =
+      parseAssemblyString(Printed, RoundTripError, RoundTripContext);
+  ASSERT_NE(nullptr, RoundTrip);
+  CheckExpression(*RoundTrip);
 }
 
 #define ASSERT_EQ_LOC(Loc1, Loc2)                                              \

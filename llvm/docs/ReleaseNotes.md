@@ -54,6 +54,15 @@ Makes programs 10x faster by doing Special New Thing.
 
 ### Changes to the LLVM IR
 
+* `DIExpression` now has storage and serialization infrastructure for ordered
+  metadata operands. No supported operation currently consumes them, so a
+  non-empty operand list is not yet valid in verified IR. LLVM IR assembly,
+  LLVM bitcode, and `llvm-link` preserve the representation. Bitcode uses
+  version 3 for expressions without operands and version 4 for expressions
+  with operands. DXIL writing rejects expressions with operands, while
+  LLVM-to-MLIR import drops affected debug constructs, because DXIL and MLIR's
+  `DIExpressionAttr` store only the integer elements.
+
 ### Changes to LLVM infrastructure
 
 ### Changes to building LLVM

@@ -34,3 +34,5 @@ else()
     -DLLVM_NATIVE_TARGET_TEST_ENABLED=0
   )
 endif()
+
+add_subdirectory(DebugImporter)

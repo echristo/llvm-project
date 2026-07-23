@@ -7157,10 +7157,36 @@ LLVM variable relates to the source language variable.
 
 See {ref}`diexpression` for details.
 
-```{note}
-`DIExpression`s are always printed and parsed inline; they can never be
-referenced by an ID (e.g., `!1`).
+`DIExpression` nodes can contain an optional ordered list of metadata
+operands. The `operands:` field, when present, must be the final field:
+
+```text
+!<n> = !DIExpression(<operations>, operands: {<metadata operands>})
 ```
+
+For uniqued expressions, operand order, duplicates, and nulls are part of the
+uniquing key. Distinct expressions keep the operands but are not uniqued. The
+`operands:` field supplies metadata operands to operations in expression
+order. Each operation specifies how many metadata operands it uses, and the
+field must contain exactly the total required by the operations. An operation
+that uses metadata operands defines their meaning and type.
+
+No supported operation currently consumes metadata operands. Consequently, a
+non-empty `operands:` field is not yet valid in verified IR. The representation
+and serialization described here provide infrastructure for operations added
+separately.
+
+The bitcode writer uses version 3 for metadata-free expressions and version 4
+for expressions with operands. Older versions continue to use the existing
+upgrade path.
+
+Operands may be null, `MDString`, `ConstantAsMetadata`, or resolved
+`MDNode` graphs containing those metadata kinds. Function-local value
+metadata and `DIArgList` are not supported.
+
+Metadata-free expressions continue to print inline, although the parser also
+accepts numbered definitions. Expressions with operands are printed as
+numbered definitions so they can be shared and participate in cycles.
 
 Some examples of expressions:
 

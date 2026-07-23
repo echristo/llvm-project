@@ -1,0 +1,58 @@
+# RUN: llc -run-pass=none -o - %s | FileCheck %s
+# RUN: llc -run-pass=none -o - %s | llc -x mir -run-pass=none -o /dev/null
+
+# Check forward references, distinct self-cycles, definition order, operands
+# that refer to IR slots, and MIR round-tripping. The operations in these
+# expressions use no metadata operands, so the operand lists fail verification.
+
+# CHECK: @0 = global i8 0
+# CHECK-NOT: extern_weak
+
+--- |
+  @0 = global i8 0
+
+  define void @func() !dbg !6 {
+  entry:
+    ret void
+  }
+
+  !llvm.module.flags = !{!0}
+  !llvm.dbg.cu = !{!1}
+
+  !0 = !{i32 2, !"Debug Info Version", i32 3}
+  !1 = distinct !DICompileUnit(language: DW_LANG_C, file: !2, producer: "test", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)
+  !2 = !DIFile(filename: "test.c", directory: "/")
+  !3 = !DISubroutineType(types: !4)
+  !4 = !{}
+  !5 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
+  !6 = distinct !DISubprogram(name: "func", scope: !2, file: !2, line: 1, type: !3, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !1, retainedNodes: !7)
+  !7 = !{!8}
+  !8 = !DILocalVariable(name: "value", scope: !6, file: !2, line: 1, type: !5)
+  !9 = !DILocation(line: 1, column: 1, scope: !6)
+
+...
+---
+name:            func
+machineMetadataNodes:
+  - '!10 = !DIExpression(DW_OP_lit0, operands: {!11})'
+  - '!11 = !{!"machine-only target"}'
+  - '!12 = distinct !DIExpression(DW_OP_lit0, operands: {!12})'
+  - '!13 = !DIExpression(DW_OP_lit0, operands: {ptr @0})'
+  - '!14 = distinct !DIExpression(DW_OP_lit0, operands: {!11})'
+body:             |
+  bb.0.entry:
+    ; CHECK: machineMetadataNodes:
+    ; CHECK-NEXT: - '![[EXPR:[0-9]+]] = !DIExpression(48, operands: {![[TARGET:[0-9]+]]})'
+    ; CHECK-NEXT: - '![[TARGET]] = !{!"machine-only target"}'
+    ; CHECK-NEXT: - '![[SELF:[0-9]+]] = distinct !DIExpression(48, operands: {![[SELF]]})'
+    ; CHECK-NEXT: - '![[CONSTANT:[0-9]+]] = !DIExpression(48, operands: {ptr @0})'
+    ; CHECK-NEXT: - '![[DISTINCT:[0-9]+]] = distinct !DIExpression(48, operands: {![[TARGET]]})'
+    ; CHECK: DBG_VALUE 0, 0, ![[VAR:[0-9]+]], ![[EXPR]], debug-location !DILocation(line: 1, column: 1, scope: !{{[0-9]+}})
+    ; CHECK: DBG_VALUE 1, 0, ![[VAR]], ![[SELF]], debug-location !DILocation(line: 1, column: 1, scope: !{{[0-9]+}})
+    ; CHECK: DBG_VALUE 2, 0, ![[VAR]], ![[CONSTANT]], debug-location !DILocation(line: 1, column: 1, scope: !{{[0-9]+}})
+    ; CHECK: DBG_VALUE 3, 0, ![[VAR]], ![[DISTINCT]], debug-location !DILocation(line: 1, column: 1, scope: !{{[0-9]+}})
+    DBG_VALUE 0, 0, !8, !10, debug-location !9
+    DBG_VALUE 1, 0, !8, !12, debug-location !9
+    DBG_VALUE 2, 0, !8, !13, debug-location !9
+    DBG_VALUE 3, 0, !8, !14, debug-location !9
+...

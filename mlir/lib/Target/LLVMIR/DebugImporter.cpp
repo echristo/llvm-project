@@ -22,6 +22,16 @@ using namespace mlir;
 using namespace mlir::LLVM;
 using namespace mlir::LLVM::detail;
 
+namespace {
+
+// DIExpressionAttr does not represent metadata operands.
+static bool hasUnsupportedDIExpression(llvm::Metadata *metadata) {
+  auto *expression = dyn_cast_or_null<llvm::DIExpression>(metadata);
+  return expression && expression->getNumOperands();
+}
+
+} // namespace
+
 DebugImporter::DebugImporter(ModuleOp mlirModule,
                              bool dropDICompositeTypeElements)
     : cache([&](llvm::DINode *node) { return createRecSelf(node); }),
@@ -45,6 +55,8 @@ Location DebugImporter::translateFuncLocation(llvm::Function *func) {
 //===----------------------------------------------------------------------===//
 
 DIBasicTypeAttr DebugImporter::translateImpl(llvm::DIBasicType *node) {
+  if (hasUnsupportedDIExpression(node->getRawSizeInBits()))
+    return nullptr;
   return DIBasicTypeAttr::get(context, node->getTag(),
                               getStringAttrOrNull(node->getRawName()),
                               node->getSizeInBits(), node->getEncoding());
@@ -75,6 +87,21 @@ DICompileUnitAttr DebugImporter::translateImpl(llvm::DICompileUnit *node) {
 }
 
 DICompositeTypeAttr DebugImporter::translateImpl(llvm::DICompositeType *node) {
+  if (hasUnsupportedDIExpression(node->getRawSizeInBits()))
+    return nullptr;
+
+  llvm::DIExpression *dataLocation = node->getDataLocationExp();
+  DIExpressionAttr dataLocationAttr = translateExpression(dataLocation);
+  llvm::DIExpression *rank = node->getRankExp();
+  DIExpressionAttr rankAttr = translateExpression(rank);
+  llvm::DIExpression *allocated = node->getAllocatedExp();
+  DIExpressionAttr allocatedAttr = translateExpression(allocated);
+  llvm::DIExpression *associated = node->getAssociatedExp();
+  DIExpressionAttr associatedAttr = translateExpression(associated);
+  if ((dataLocation && !dataLocationAttr) || (rank && !rankAttr) ||
+      (allocated && !allocatedAttr) || (associated && !associatedAttr))
+    return nullptr;
+
   std::optional<DIFlags> flags = symbolizeDIFlags(node->getFlags());
   SmallVector<DINodeAttr> elements;
 
@@ -98,15 +125,16 @@ DICompositeTypeAttr DebugImporter::translateImpl(llvm::DICompositeType *node) {
       context, node->getTag(), getStringAttrOrNull(node->getRawName()),
       translate(node->getFile()), node->getLine(), translate(node->getScope()),
       baseType, flags.value_or(DIFlags::Zero), node->getSizeInBits(),
-      node->getAlignInBits(), translateExpression(node->getDataLocationExp()),
-      translateExpression(node->getRankExp()),
-      translateExpression(node->getAllocatedExp()),
-      translateExpression(node->getAssociatedExp()),
-      getStringAttrOrNull(node->getRawIdentifier()),
+      node->getAlignInBits(), dataLocationAttr, rankAttr, allocatedAttr,
+      associatedAttr, getStringAttrOrNull(node->getRawIdentifier()),
       translate(node->getDiscriminator()), elements);
 }
 
 DIDerivedTypeAttr DebugImporter::translateImpl(llvm::DIDerivedType *node) {
+  if (hasUnsupportedDIExpression(node->getRawSizeInBits()) ||
+      hasUnsupportedDIExpression(node->getRawOffsetInBits()))
+    return nullptr;
+
   // Return nullptr if the base type is invalid.
   DITypeAttr baseType = translate(node->getBaseType());
   if (node->getBaseType() && !baseType)
@@ -133,12 +161,22 @@ DIDerivedTypeAttr DebugImporter::translateImpl(llvm::DIDerivedType *node) {
 }
 
 DIStringTypeAttr DebugImporter::translateImpl(llvm::DIStringType *node) {
+  if (hasUnsupportedDIExpression(node->getRawSizeInBits()))
+    return nullptr;
+
+  llvm::DIExpression *stringLength = node->getStringLengthExp();
+  DIExpressionAttr stringLengthAttr = translateExpression(stringLength);
+  llvm::DIExpression *stringLocation = node->getStringLocationExp();
+  DIExpressionAttr stringLocationAttr = translateExpression(stringLocation);
+  if ((stringLength && !stringLengthAttr) ||
+      (stringLocation && !stringLocationAttr))
+    return nullptr;
+
   return DIStringTypeAttr::get(
       context, node->getTag(), getStringAttrOrNull(node->getRawName()),
       node->getSizeInBits(), node->getAlignInBits(),
-      translate(node->getStringLength()),
-      translateExpression(node->getStringLengthExp()),
-      translateExpression(node->getStringLocationExp()), node->getEncoding());
+      translate(node->getStringLength()), stringLengthAttr, stringLocationAttr,
+      node->getEncoding());
 }
 
 DIFileAttr DebugImporter::translateImpl(llvm::DIFile *node) {
@@ -300,49 +338,18 @@ DISubprogramAttr DebugImporter::translateImpl(llvm::DISubprogram *node) {
 }
 
 DISubrangeAttr DebugImporter::translateImpl(llvm::DISubrange *node) {
+  bool hasUnsupportedExpression = false;
   auto getAttrOrNull = [&](llvm::DISubrange::BoundType data) -> Attribute {
     if (data.isNull())
       return nullptr;
     if (auto *constInt = dyn_cast<llvm::ConstantInt *>(data))
       return IntegerAttr::get(IntegerType::get(context, 64),
                               constInt->getSExtValue());
-    if (auto *expr = dyn_cast<llvm::DIExpression *>(data))
-      return translateExpression(expr);
-    if (auto *var = dyn_cast<llvm::DIVariable *>(data)) {
-      if (auto *local = dyn_cast<llvm::DILocalVariable>(var))
-        return translate(local);
-      if (auto *global = dyn_cast<llvm::DIGlobalVariable>(var))
-        return translate(global);
-      return nullptr;
+    if (auto *expr = dyn_cast<llvm::DIExpression *>(data)) {
+      DIExpressionAttr attr = translateExpression(expr);
+      hasUnsupportedExpression |= !attr;
+      return attr;
     }
-    return nullptr;
-  };
-  Attribute count = getAttrOrNull(node->getCount());
-  Attribute upperBound = getAttrOrNull(node->getUpperBound());
-  // Either count or the upper bound needs to be present. Otherwise, the
-  // metadata is invalid. The conversion might fail due to unsupported DI nodes.
-  if (!count && !upperBound)
-    return {};
-  return DISubrangeAttr::get(context, count,
-                             getAttrOrNull(node->getLowerBound()), upperBound,
-                             getAttrOrNull(node->getStride()));
-}
-
-DICommonBlockAttr DebugImporter::translateImpl(llvm::DICommonBlock *node) {
-  return DICommonBlockAttr::get(context, translate(node->getScope()),
-                                translate(node->getDecl()),
-                                getStringAttrOrNull(node->getRawName()),
-                                translate(node->getFile()), node->getLineNo());
-}
-
-DIGenericSubrangeAttr
-DebugImporter::translateImpl(llvm::DIGenericSubrange *node) {
-  auto getAttrOrNull =
-      [&](llvm::DIGenericSubrange::BoundType data) -> Attribute {
-    if (data.isNull())
-      return nullptr;
-    if (auto *expr = dyn_cast<llvm::DIExpression *>(data))
-      return translateExpression(expr);
     if (auto *var = dyn_cast<llvm::DIVariable *>(data)) {
       if (auto *local = dyn_cast<llvm::DILocalVariable>(var))
         return translate(local);
@@ -356,6 +363,49 @@ DebugImporter::translateImpl(llvm::DIGenericSubrange *node) {
   Attribute upperBound = getAttrOrNull(node->getUpperBound());
   Attribute lowerBound = getAttrOrNull(node->getLowerBound());
   Attribute stride = getAttrOrNull(node->getStride());
+  if (hasUnsupportedExpression)
+    return nullptr;
+  // Either count or the upper bound needs to be present. Otherwise, the
+  // metadata is invalid. The conversion might fail due to unsupported DI nodes.
+  if (!count && !upperBound)
+    return {};
+  return DISubrangeAttr::get(context, count, lowerBound, upperBound, stride);
+}
+
+DICommonBlockAttr DebugImporter::translateImpl(llvm::DICommonBlock *node) {
+  return DICommonBlockAttr::get(context, translate(node->getScope()),
+                                translate(node->getDecl()),
+                                getStringAttrOrNull(node->getRawName()),
+                                translate(node->getFile()), node->getLineNo());
+}
+
+DIGenericSubrangeAttr
+DebugImporter::translateImpl(llvm::DIGenericSubrange *node) {
+  bool hasUnsupportedExpression = false;
+  auto getAttrOrNull =
+      [&](llvm::DIGenericSubrange::BoundType data) -> Attribute {
+    if (data.isNull())
+      return nullptr;
+    if (auto *expr = dyn_cast<llvm::DIExpression *>(data)) {
+      DIExpressionAttr attr = translateExpression(expr);
+      hasUnsupportedExpression |= !attr;
+      return attr;
+    }
+    if (auto *var = dyn_cast<llvm::DIVariable *>(data)) {
+      if (auto *local = dyn_cast<llvm::DILocalVariable>(var))
+        return translate(local);
+      if (auto *global = dyn_cast<llvm::DIGlobalVariable>(var))
+        return translate(global);
+      return nullptr;
+    }
+    return nullptr;
+  };
+  Attribute count = getAttrOrNull(node->getCount());
+  Attribute upperBound = getAttrOrNull(node->getUpperBound());
+  Attribute lowerBound = getAttrOrNull(node->getLowerBound());
+  Attribute stride = getAttrOrNull(node->getStride());
+  if (hasUnsupportedExpression)
+    return nullptr;
   // Either count or the upper bound needs to be present. Otherwise, the
   // metadata is invalid.
   if (!count && !upperBound)
@@ -514,7 +564,7 @@ Location DebugImporter::translateLoc(llvm::DILocation *loc) {
 }
 
 DIExpressionAttr DebugImporter::translateExpression(llvm::DIExpression *node) {
-  if (!node)
+  if (!node || hasUnsupportedDIExpression(node))
     return nullptr;
 
   SmallVector<DIExpressionElemAttr> ops;
@@ -533,9 +583,11 @@ DIExpressionAttr DebugImporter::translateExpression(llvm::DIExpression *node) {
 
 DIGlobalVariableExpressionAttr DebugImporter::translateGlobalVariableExpression(
     llvm::DIGlobalVariableExpression *node) {
+  DIExpressionAttr expression = translateExpression(node->getExpression());
+  if (node->getExpression() && !expression)
+    return nullptr;
   return DIGlobalVariableExpressionAttr::get(
-      context, translate(node->getVariable()),
-      translateExpression(node->getExpression()));
+      context, translate(node->getVariable()), expression);
 }
 
 StringAttr DebugImporter::getStringAttrOrNull(llvm::MDString *stringNode) {
